@@ -34,7 +34,7 @@ st.markdown(
 )
 
 
-# 2. XỬ LÝ ẢNH & TÁCH THẺ AN TOÀN
+# 2. XỬ LÝ ẢNH & TÁCH THẺ AN TOÀN KO MẤT GÓC
 def load_and_fix_orientation(file):
     """Sửa lỗi xoay góc EXIF từ camera điện thoại & nén dung lượng chống tràn RAM."""
     img = Image.open(file)
@@ -50,7 +50,7 @@ def load_and_fix_orientation(file):
 
 
 def smart_crop_and_split(pil_img):
-    """Tự động phát hiện và cắt viền thẻ."""
+    """Tự động phát hiện và cắt viền thẻ với lề an toàn cực rộng (padding = 30px) để ko bao giờ lẹm góc."""
     img_np = np.array(pil_img)
     h_img, w_img, _ = img_np.shape
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
@@ -100,7 +100,7 @@ def smart_crop_and_split(pil_img):
 
     if len(filtered) >= 1:
         results = []
-        pad = 8
+        pad = 30  # Tăng lên 30px lề để ôm trọn 4 góc thẻ
         for x, y, w, h, _ in filtered:
             x_pad = max(0, x - pad)
             y_pad = max(0, y - pad)
@@ -122,12 +122,26 @@ def smart_crop_and_split(pil_img):
 
 
 def standardize_card_size(pil_img, target_w=856, target_h=540):
-    """Ép bắt buộc cả Chiều Rộng lẫn Chiều Cao về tỉ lệ ISO chuẩn để 2 mặt luôn bằng chằn chặn."""
-    return pil_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+    """
+    Nắn hình thông minh (Fit without Crop):
+    Giữ 100% chi tiết ảnh gốc, đặt vào khung tiêu chuẩn ISO 856x540px.
+    """
+    w, h = pil_img.size
+    scale = min(target_w / float(w), target_h / float(h))
+    new_w, new_h = int(w * scale), int(h * scale)
+
+    resized_img = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    # Đặt ảnh vào giữa khung Canvas màu trắng để ko bị méo hay xém góc
+    canvas = Image.new("RGB", (target_w, target_h), (255, 255, 255))
+    paste_x = (target_w - new_w) // 2
+    paste_y = (target_h - new_h) // 2
+    canvas.paste(resized_img, (paste_x, paste_y))
+    return canvas
 
 
 def create_docx_dynamic(cards_rows, space_between=20):
-    """Tạo file Word (.docx) chuẩn lề in A4 với kích thước thẻ cố định."""
+    """Tạo file Word (.docx) chuẩn lề in A4."""
     doc = docx.Document()
     for section in doc.sections:
         section.top_margin = Inches(0.6)
@@ -146,7 +160,6 @@ def create_docx_dynamic(cards_rows, space_between=20):
         table = doc.add_table(rows=1, cols=2)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
-        # Ép cố định cả Rộng (3.37 inches) lẫn Cao (2.125 inches) trong Word
         cell_f = table.cell(0, 0).paragraphs[0].add_run()
         cell_f.add_picture(buf_f, width=Inches(3.37), height=Inches(2.125))
 
@@ -188,7 +201,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="sub-title">Cắt viền & ghép A4 kích thước chuẩn ISO bằng chằn chặn</div>',
+    '<div class="sub-title">Bảo toàn 100% nội dung & góc thẻ (Chuẩn ISO)</div>',
     unsafe_allow_html=True,
 )
 
@@ -199,14 +212,13 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    with st.spinner("✨ Đang tự động xử lý và đồng nhất kích thước..."):
+    with st.spinner("✨ Đang tự động xử lý và bảo toàn góc thẻ..."):
         images_cropped = []
         for f in uploaded_files:
             raw_img = load_and_fix_orientation(f)
             extracted_cards = smart_crop_and_split(raw_img)
 
             for card in extracted_cards:
-                # Đồng nhất kích thước cả Rộng và Cao ngay từ đầu
                 card_std = standardize_card_size(card)
 
                 if draw_border:
@@ -221,7 +233,7 @@ if uploaded_files:
                 images_cropped.append(card_std)
 
     st.markdown("---")
-    st.markdown("### 📸 Các mặt thẻ đã được chuẩn hóa bằng nhau")
+    st.markdown("### 📸 Các mặt thẻ đã được chuẩn hóa nguyên vẹn 100%")
 
     cols = st.columns(len(images_cropped))
     for idx, img in enumerate(images_cropped):
@@ -249,7 +261,7 @@ if uploaded_files:
         b_img = images_cropped[i + 1] if i + 1 < len(images_cropped) else None
         cards_rows.append({"front": f_img, "back": b_img})
 
-    # DỰNG KHUNG A4 VỚI KÍCH THƯỚC THẺ CỐ ĐỊNH (510 x 321 px)
+    # DỰNG KHUNG A4 VỚI KÍCH THƯỚC CỐ ĐỊNH (510 x 321 px)
     a4_w, a4_h = 1240, 1754
     canvas = Image.new("RGB", (a4_w, a4_h), "#ffffff")
 
@@ -260,7 +272,6 @@ if uploaded_files:
 
     current_y = 160
     for row in cards_rows:
-        # Ép cứng tỉ lệ 510x321 khi dán lên A4
         f_res = row["front"].resize(
             (target_w, target_h), Image.Resampling.LANCZOS
         )
