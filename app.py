@@ -15,8 +15,19 @@ st.set_page_config(
 
 st.title("🖨️ Photo Ghép CCCD + GPLX lên 1 Trang A4")
 st.write(
-    "Hỗ trợ tự động cắt bỏ phần thừa và xếp **CCCD (hàng trên) & GPLX (hàng dưới)** nằm ngang trên cùng 1 trang A4 để in/photocopy."
+    "Tự động tách nền, cắt viền và ghép **CCCD (hàng trên) & GPLX (hàng dưới)** nằm ngang lên trang A4 để in/photocopy."
 )
+
+
+def resize_image_if_large(pil_img, max_dim=1200):
+    """Giảm kích thước ảnh đầu vào để xử lý siêu nhanh & tránh quá tải RAM."""
+    w, h = pil_img.size
+    if max(w, h) > max_dim:
+        scale = max_dim / float(max(w, h))
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        return pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    return pil_img
 
 
 def crop_card(image_np):
@@ -75,22 +86,14 @@ def crop_card(image_np):
     return image_np
 
 
-def add_card_row_to_doc(doc, pil_front, pil_back, label=""):
-    """Thêm 1 hàng gồm 2 mặt nằm ngang vào file Word."""
-    if label:
-        p_title = doc.add_paragraph()
-        run_title = p_title.add_run(label)
-        run_title.bold = True
-        run_title.font.size = Pt(12)
-        p_title.paragraph_format.space_before = Pt(12)
-        p_title.paragraph_format.space_after = Pt(4)
-
+def add_card_row_to_doc(doc, pil_front, pil_back, is_last=False):
+    """Thêm 1 hàng gồm 2 mặt nằm ngang vào file Word (Không chữ)."""
     buf_front = io.BytesIO()
-    pil_front.save(buf_front, format="PNG")
+    pil_front.save(buf_front, format="JPEG", quality=90)
     buf_front.seek(0)
 
     buf_back = io.BytesIO()
-    pil_back.save(buf_back, format="PNG")
+    pil_back.save(buf_back, format="JPEG", quality=90)
     buf_back.seek(0)
 
     table = doc.add_table(rows=1, cols=2)
@@ -116,21 +119,26 @@ def add_card_row_to_doc(doc, pil_front, pil_back, label=""):
                 tcBorders.append(border)
             tcPr.append(tcBorders)
 
+    # Thêm khoảng trống giữa 2 hàng thẻ
+    if not is_last:
+        p_space = doc.add_paragraph()
+        p_space.paragraph_format.space_before = Pt(20)
+        p_space.paragraph_format.space_after = Pt(0)
+
 
 def create_docx_combined(cards_data):
-    """Tạo file Word (.docx) chứa cả CCCD và GPLX."""
+    """Tạo file Word (.docx) chứa thuần ảnh CCCD và GPLX (không tiêu đề)."""
     doc = docx.Document()
 
     for section in doc.sections:
-        section.top_margin = Inches(0.5)
-        section.bottom_margin = Inches(0.5)
+        section.top_margin = Inches(0.6)
+        section.bottom_margin = Inches(0.6)
         section.left_margin = Inches(0.5)
         section.right_margin = Inches(0.5)
 
-    for item in cards_data:
-        add_card_row_to_doc(
-            doc, item["front"], item["back"], label=item["title"]
-        )
+    for idx, item in enumerate(cards_data):
+        is_last = idx == len(cards_data) - 1
+        add_card_row_to_doc(doc, item["front"], item["back"], is_last=is_last)
 
     doc_io = io.BytesIO()
     doc.save(doc_io)
@@ -163,26 +171,74 @@ with col4:
     )
 
 if cccd_front_file and cccd_back_file and gplx_front_file and gplx_back_file:
-    with st.spinner("Đang tự động tách nền & xếp bố cục..."):
-        # Process CCCD
-        pil_cccd_f = Image.fromarray(
-            crop_card(
-                np.array(Image.open(cccd_front_file).convert("RGB"))
-            )
+    with st.spinner("Đang tự động tách nền & tối ưu tốc độ..."):
+        # Đọc & thu nhỏ kích thước nếu quá nặng
+        raw_cccd_f = resize_image_if_large(
+            Image.open(cccd_front_file).convert("RGB")
         )
-        pil_cccd_b = Image.fromarray(
-            crop_card(np.array(Image.open(cccd_back_file).convert("RGB")))
+        raw_cccd_b = resize_image_if_large(
+            Image.open(cccd_back_file).convert("RGB")
+        )
+        raw_gplx_f = resize_image_if_large(
+            Image.open(gplx_front_file).convert("RGB")
+        )
+        raw_gplx_b = resize_image_if_large(
+            Image.open(gplx_back_file).convert("RGB")
         )
 
-        # Process GPLX
-        pil_gplx_f = Image.fromarray(
-            crop_card(
-                np.array(Image.open(gplx_front_file).convert("RGB"))
-            )
+        # Tách nền cắt viền
+        pil_cccd_f = Image.fromarray(crop_card(np.array(raw_cccd_f)))
+        pil_cccd_b = Image.fromarray(crop_card(np.array(raw_cccd_b)))
+        pil_gplx_f = Image.fromarray(crop_card(np.array(raw_gplx_f)))
+        pil_gplx_b = Image.fromarray(crop_card(np.array(raw_gplx_b)))
+
+        # Ghép File Word (.docx)
+        cards_data = [
+            {"front": pil_cccd_f, "back": pil_cccd_b},
+            {"front": pil_gplx_f, "back": pil_gplx_b},
+        ]
+        docx_bytes = create_docx_combined(cards_data).getvalue()
+
+        # Ghép Trang Ảnh A4
+        a4_w, a4_h = 1240, 1754
+        canvas = Image.new("RGB", (a4_w, a4_h), "white")
+
+        target_w = 510
+        gap_x = 50
+        x_front = (a4_w - (target_w * 2 + gap_x)) // 2
+        x_back = x_front + target_w + gap_x
+
+        # CCCD
+        r_cccd_f = target_w / pil_cccd_f.width
+        cccd_f_res = pil_cccd_f.resize(
+            (target_w, int(pil_cccd_f.height * r_cccd_f))
         )
-        pil_gplx_b = Image.fromarray(
-            crop_card(np.array(Image.open(gplx_back_file).convert("RGB")))
+        r_cccd_b = target_w / pil_cccd_b.width
+        cccd_b_res = pil_cccd_b.resize(
+            (target_w, int(pil_cccd_b.height * r_cccd_b))
         )
+
+        y_cccd = 150
+        canvas.paste(cccd_f_res, (x_front, y_cccd))
+        canvas.paste(cccd_b_res, (x_back, y_cccd))
+
+        # GPLX
+        r_gplx_f = target_w / pil_gplx_f.width
+        gplx_f_res = pil_gplx_f.resize(
+            (target_w, int(pil_gplx_f.height * r_gplx_f))
+        )
+        r_gplx_b = target_w / pil_gplx_b.width
+        gplx_b_res = pil_gplx_b.resize(
+            (target_w, int(pil_gplx_b.height * r_gplx_b))
+        )
+
+        y_gplx = y_cccd + cccd_f_res.height + 120
+        canvas.paste(gplx_f_res, (x_front, y_gplx))
+        canvas.paste(gplx_b_res, (x_back, y_gplx))
+
+        img_io = io.BytesIO()
+        canvas.save(img_io, format="JPEG", quality=90)
+        img_bytes = img_io.getvalue()
 
     st.markdown("---")
     st.subheader("📸 Kết quả cắt từng mặt")
@@ -192,56 +248,8 @@ if cccd_front_file and cccd_back_file and gplx_front_file and gplx_back_file:
     r2_c1.image(pil_gplx_f, caption="GPLX Trước", use_container_width=True)
     r2_c2.image(pil_gplx_b, caption="GPLX Sau", use_container_width=True)
 
-    # Ghép Ảnh PNG A4
-    a4_w, a4_h = 1240, 1754
-    canvas = Image.new("RGB", (a4_w, a4_h), "white")
-
-    target_w = 510
-    gap_x = 50
-    x_front = (a4_w - (target_w * 2 + gap_x)) // 2
-    x_back = x_front + target_w + gap_x
-
-    # Ghép CCCD (Hàng 1)
-    r_cccd_f = target_w / pil_cccd_f.width
-    cccd_f_res = pil_cccd_f.resize(
-        (target_w, int(pil_cccd_f.height * r_cccd_f))
-    )
-    r_cccd_b = target_w / pil_cccd_b.width
-    cccd_b_res = pil_cccd_b.resize(
-        (target_w, int(pil_cccd_b.height * r_cccd_b))
-    )
-
-    y_cccd = 150
-    canvas.paste(cccd_f_res, (x_front, y_cccd))
-    canvas.paste(cccd_b_res, (x_back, y_cccd))
-
-    # Ghép GPLX (Hàng 2)
-    r_gplx_f = target_w / pil_gplx_f.width
-    gplx_f_res = pil_gplx_f.resize(
-        (target_w, int(pil_gplx_f.height * r_gplx_f))
-    )
-    r_gplx_b = target_w / pil_gplx_b.width
-    gplx_b_res = pil_gplx_b.resize(
-        (target_w, int(pil_gplx_b.height * r_gplx_b))
-    )
-
-    y_gplx = y_cccd + cccd_f_res.height + 120
-    canvas.paste(gplx_f_res, (x_front, y_gplx))
-    canvas.paste(gplx_b_res, (x_back, y_gplx))
-
-    img_io = io.BytesIO()
-    canvas.save(img_io, format="PNG")
-    img_io.seek(0)
-
-    # Ghép File Word (.docx)
-    cards_data = [
-        {"title": "1. CĂN CƯỚC CÔNG DÂN", "front": pil_cccd_f, "back": pil_cccd_b},
-        {"title": "2. GIẤY PHÉP LÁI XE", "front": pil_gplx_f, "back": pil_gplx_b},
-    ]
-    docx_io = create_docx_combined(cards_data)
-
     st.markdown("---")
-    st.subheader("📄 Xem trước Trang in A4 Hoàn chỉnh")
+    st.subheader("📄 Xem trước Trang in A4")
     st.image(
         canvas, width=450, caption="Trang A4 chứa cả CCCD và GPLX sẵn sàng để in"
     )
@@ -250,16 +258,16 @@ if cccd_front_file and cccd_back_file and gplx_front_file and gplx_back_file:
     with btn1:
         st.download_button(
             label="📝 Tải file WORD (.docx)",
-            data=docx_io,
+            data=docx_bytes,
             file_name="CCCD_va_GPLX_in_A4.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             use_container_width=True,
         )
     with btn2:
         st.download_button(
-            label="🖼️ Tải file ÁNH (.png)",
-            data=img_io,
-            file_name="CCCD_va_GPLX_in_A4.png",
-            mime="image/png",
+            label="🖼️ Tải file ÁNH (.jpg)",
+            data=img_bytes,
+            file_name="CCCD_va_GPLX_in_A4.jpg",
+            mime="image/jpeg",
             use_container_width=True,
         )
