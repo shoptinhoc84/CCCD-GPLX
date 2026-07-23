@@ -9,7 +9,7 @@ import streamlit as st
 
 # 1. CẤU HÌNH TRANG & CUSTOM CSS
 st.set_page_config(
-    page_title="Photo Doc Pro - Ghép Giấy Tờ Tự Động",
+    page_title="Photo Doc Pro - Ghép Giấy Tờ A4",
     page_icon="📄",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -21,12 +21,6 @@ st.markdown(
     .main { background-color: #f8f9fa; }
     .main-title { color: #0f172a; font-weight: 800; font-size: 2.2rem; margin-bottom: 0.2rem; }
     .sub-title { color: #475569; font-size: 1.05rem; margin-bottom: 2rem; }
-    .status-badge {
-        display: inline-block; padding: 4px 12px; border-radius: 20px;
-        font-size: 0.85rem; font-weight: 600; margin-bottom: 10px;
-    }
-    .badge-cccd { background-color: #e0f2fe; color: #0369a1; }
-    .badge-gplx { background-color: #fef3c7; color: #b45309; }
     
     div.stDownloadButton > button {
         width: 100%; border-radius: 8px; height: 48px; font-weight: 600; font-size: 1rem;
@@ -40,7 +34,7 @@ st.markdown(
 )
 
 
-# 2. XỬ LÝ ẢNH & THUẬT TOÁN TỐI ƯU
+# 2. XỬ LÝ CẮT ẢNH
 def resize_image_if_large(pil_img, max_dim=1200):
     w, h = pil_img.size
     if max(w, h) > max_dim:
@@ -52,7 +46,7 @@ def resize_image_if_large(pil_img, max_dim=1200):
 
 
 def crop_card(image_np):
-    """Cắt viền tự động, bảo toàn lề không bị xém vào chữ."""
+    """Cắt viền tự động, không lẹm chữ."""
     h_img, w_img, _ = image_np.shape
     gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -75,7 +69,6 @@ def crop_card(image_np):
 
     if best_rect:
         x, y, w, h = best_rect
-        # Mở rộng padding 8px để tránh lẹm viền
         x = max(0, x - 8)
         y = max(0, y - 8)
         w = min(w_img - x, w + 16)
@@ -103,57 +96,6 @@ def crop_card(image_np):
             return image_np[y : y + h, x : x + w]
 
     return image_np
-
-
-def classify_card(pil_img):
-    """Phân loại chính xác mặt trước / mặt sau của CCCD và GPLX."""
-    img_np = np.array(pil_img)
-    h, w, _ = img_np.shape
-    hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
-
-    # 1. Phát hiện GPLX dựa trên màu vàng nền
-    yellow_mask = cv2.inRange(hsv, (15, 30, 150), (35, 255, 255))
-    is_gplx = (np.sum(yellow_mask > 0) / (h * w)) > 0.25
-
-    # 2. Phát hiện Quốc huy đỏ/vàng mặt trước CCCD (Góc trên trái)
-    top_left_hsv = hsv[: int(h * 0.45), : int(w * 0.45)]
-    red_mask1 = cv2.inRange(top_left_hsv, (0, 70, 50), (10, 255, 255))
-    red_mask2 = cv2.inRange(top_left_hsv, (170, 70, 50), (180, 255, 255))
-    has_emblem = (np.sum(red_mask1 > 0) + np.sum(red_mask2 > 0)) > (
-        h * w * 0.003
-    )
-
-    # 3. Phát hiện Chip điện tử mặt sau CCCD
-    left_chip_hsv = hsv[: int(h * 0.7), : int(w * 0.45)]
-    gold_chip_mask = cv2.inRange(
-        left_chip_hsv, (15, 80, 80), (35, 255, 255)
-    )
-    has_chip = np.sum(gold_chip_mask > 0) > (h * w * 0.002)
-
-    if is_gplx:
-        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-        left_side = gray[:, : int(w * 0.4)]
-        right_side = gray[:, int(w * 0.6) :]
-        return (
-            "gplx_front"
-            if np.std(left_side) > np.std(right_side) + 5
-            else "gplx_back"
-        )
-    else:
-        if has_emblem:
-            return "cccd_front"
-        elif has_chip:
-            return "cccd_back"
-        else:
-            # Fallback phân tích vùng ảnh chân dung
-            gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-            left_side = gray[:, : int(w * 0.4)]
-            right_side = gray[:, int(w * 0.6) :]
-            return (
-                "cccd_front"
-                if np.std(left_side) > np.std(right_side) + 3
-                else "cccd_back"
-            )
 
 
 def create_docx_dynamic(cards_rows, space_between=20):
@@ -213,7 +155,7 @@ with st.sidebar:
     draw_border = st.checkbox("Thêm viền mỏng quanh thẻ khi in", value=False)
     st.markdown("---")
     st.info(
-        "💡 **Mẹo:** Bạn có thể đổi vị trí giữa Mặt trước & Mặt sau trực tiếp bằng menu chọn bên dưới nếu hệ thống xếp nhầm."
+        "💡 **Cách dùng:** Kéo thả từ **1 đến 4 ảnh** bất kỳ. Hệ thống tự động cắt viền và xếp đều 2 mặt nằm ngang trên A4!"
     )
 
 # 4. GIAO DIỆN CHÍNH
@@ -222,130 +164,68 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="sub-title">Tự động cắt viền & xếp trang in A4 linh hoạt cho CCCD và GPLX</div>',
+    '<div class="sub-title">Tự động cắt viền & ghép giấy tờ nằm ngang in A4</div>',
     unsafe_allow_html=True,
 )
 
 uploaded_files = st.file_uploader(
-    "📥 Tải ảnh lên (Thả từ 1 đến 4 ảnh cùng lúc):",
+    "📥 Tải ảnh lên (Chọn từ 1 đến 4 ảnh):",
     type=["jpg", "jpeg", "png"],
     accept_multiple_files=True,
 )
 
 if uploaded_files:
-    with st.spinner("✨ Đang tự động tách nền và phân loại mặt thẻ..."):
-        raw_images = [
-            Image.fromarray(
-                crop_card(
-                    np.array(
-                        resize_image_if_large(Image.open(f).convert("RGB"))
-                    )
-                )
-            )
-            for f in uploaded_files
-        ]
+    with st.spinner("✨ Đang tự động tách nền và cắt viền..."):
+        images_cropped = []
+        for f in uploaded_files:
+            raw_img = resize_image_if_large(Image.open(f).convert("RGB"))
+            cropped_np = crop_card(np.array(raw_img))
+            cropped_pil = Image.fromarray(cropped_np)
 
-    st.markdown("---")
-    st.markdown("### 📸 Tùy chỉnh & Đổi thứ tự mặt thẻ (nếu cần)")
-
-    # Bảng phân loại thủ công/tự động linh hoạt
-    cols = st.columns(len(raw_images))
-    final_cards = []
-
-    options_list = [
-        "CCCD Mặt trước",
-        "CCCD Mặt sau",
-        "GPLX Mặt trước",
-        "GPLX Mặt sau",
-    ]
-
-    for idx, img in enumerate(raw_images):
-        auto_type = classify_card(img)
-        default_idx = 0
-        if auto_type == "cccd_front":
-            default_idx = 0
-        elif auto_type == "cccd_back":
-            default_idx = 1
-        elif auto_type == "gplx_front":
-            default_idx = 2
-        elif auto_type == "gplx_back":
-            default_idx = 3
-
-        with cols[idx]:
-            st.image(img, use_container_width=True)
-            selected_type = st.selectbox(
-                f"Ảnh {idx+1}:",
-                options_list,
-                index=default_idx,
-                key=f"select_{idx}",
-            )
-
-            # Áp dụng viền nếu chọn
-            processed_pil = img
             if draw_border:
                 img_border = Image.new(
-                    "RGB", (img.width + 4, img.height + 4), "#cbd5e1"
+                    "RGB",
+                    (cropped_pil.width + 4, cropped_pil.height + 4),
+                    "#cbd5e1",
                 )
-                img_border.paste(img, (2, 2))
-                processed_pil = img_border
+                img_border.paste(cropped_pil, (2, 2))
+                cropped_pil = img_border
 
-            final_cards.append(
-                {"label_type": selected_type, "img": processed_pil}
-            )
+            images_cropped.append(cropped_pil)
 
-    # Gom nhóm theo CCCD và GPLX để xuất A4
+    # Hiển thị kết quả đã cắt
+    st.markdown("---")
+    st.markdown("### 📸 Các ảnh đã được tự động cắt viền")
+    cols = st.columns(len(images_cropped))
+    for idx, img in enumerate(images_cropped):
+        with cols[idx]:
+            st.caption(f"Ảnh {idx+1}")
+            st.image(img, use_container_width=True)
+
+    # Cho phép đảo vị trí nếu cần
+    swap = False
+    if len(images_cropped) >= 2:
+        swap = st.checkbox("🔄 Đảo vị trí Trái ↔ Phải (Đổi vị trí 2 mặt)")
+
+    if swap:
+        # Đảo thứ tự theo cặp 2 ảnh
+        new_imgs = []
+        for i in range(0, len(images_cropped), 2):
+            pair = images_cropped[i : i + 2]
+            if len(pair) == 2:
+                new_imgs.extend([pair[1], pair[0]])
+            else:
+                new_imgs.extend(pair)
+        images_cropped = new_imgs
+
+    # Nhóm thành các hàng 2 ảnh (Hàng 1: Ảnh 1-2, Hàng 2: Ảnh 3-4)
     cards_rows = []
+    for i in range(0, len(images_cropped), 2):
+        f_img = images_cropped[i]
+        b_img = images_cropped[i + 1] if i + 1 < len(images_cropped) else None
+        cards_rows.append({"front": f_img, "back": b_img})
 
-    # Nhóm CCCD
-    cccd_f = next(
-        (x["img"] for x in final_cards if x["label_type"] == "CCCD Mặt trước"),
-        None,
-    )
-    cccd_b = next(
-        (x["img"] for x in final_cards if x["label_type"] == "CCCD Mặt sau"),
-        None,
-    )
-
-    if cccd_f or cccd_b:
-        cards_rows.append(
-            {
-                "label": "CCCD",
-                "front": cccd_f if cccd_f else cccd_b,
-                "back": cccd_b if cccd_f else None,
-            }
-        )
-
-    # Nhóm GPLX
-    gplx_f = next(
-        (x["img"] for x in final_cards if x["label_type"] == "GPLX Mặt trước"),
-        None,
-    )
-    gplx_b = next(
-        (x["img"] for x in final_cards if x["label_type"] == "GPLX Mặt sau"),
-        None,
-    )
-
-    if gplx_f or gplx_b:
-        cards_rows.append(
-            {
-                "label": "GPLX",
-                "front": gplx_f if gplx_f else gplx_b,
-                "back": gplx_b if gplx_f else None,
-            }
-        )
-
-    # Nếu chọn loại trùng lặp hoặc tự chọn linh hoạt
-    if not cards_rows:
-        for i in range(0, len(final_cards), 2):
-            f_img = final_cards[i]["img"]
-            b_img = (
-                final_cards[i + 1]["img"] if i + 1 < len(final_cards) else None
-            )
-            cards_rows.append(
-                {"label": "Giấy tờ", "front": f_img, "back": b_img}
-            )
-
-    # TẠO CANVAS A4 CHUẨN
+    # DỰNG CANVAS A4
     a4_w, a4_h = 1240, 1754
     canvas = Image.new("RGB", (a4_w, a4_h), "#ffffff")
     target_w = 510
@@ -355,7 +235,7 @@ if uploaded_files:
 
     current_y = 160
     for row in cards_rows:
-        # Mặt trước
+        # Ảnh mặt bên trái
         f_res = row["front"].resize(
             (
                 target_w,
@@ -364,7 +244,7 @@ if uploaded_files:
         )
         canvas.paste(f_res, (x_front, current_y))
 
-        # Mặt sau
+        # Ảnh mặt bên phải (nếu có)
         if row["back"]:
             b_res = row["back"].resize(
                 (
@@ -376,7 +256,7 @@ if uploaded_files:
 
         current_y += f_res.height + space_val
 
-    # Xuất file Word & Ảnh
+    # Tạo dữ liệu tải về
     docx_bytes = create_docx_dynamic(
         cards_rows, space_between=space_val
     ).getvalue()
