@@ -13,9 +13,9 @@ st.set_page_config(
     page_icon="🖨️",
 )
 
-st.title("🖨️ Photo Ghép CCCD + GPLX lên 1 Trang A4")
+st.title("🖨️ Photo Ghép Giấy Tờ Tự Động (Kéo thả 1 Lần)")
 st.write(
-    "Tự động tách nền, cắt viền và ghép **CCCD (hàng trên) & GPLX (hàng dưới)** nằm ngang lên trang A4 để in/photocopy."
+    "Tải lên **cùng lúc 4 ảnh** (2 mặt CCCD + 2 mặt GPLX). Hệ thống sẽ **tự nhận diện từng mặt**, cắt viền và xếp lên trang A4."
 )
 
 
@@ -37,7 +37,6 @@ def crop_card(image_np):
     gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # Threshold tự động (Otsu)
     _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     contours, _ = cv2.findContours(
@@ -66,7 +65,6 @@ def crop_card(image_np):
         h = min(h_img - y, h + 6)
         return image_np[y : y + h, x : x + w]
 
-    # Dự phòng bằng Canny Edge Detection
     edges = cv2.Canny(blur, 30, 150)
     contours, _ = cv2.findContours(
         edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
@@ -86,8 +84,52 @@ def crop_card(image_np):
     return image_np
 
 
+def classify_card(pil_img):
+    """Phân loại ảnh thuộc loại nào: 'cccd_front', 'cccd_back', 'gplx_front', 'gplx_back'."""
+    img_np = np.array(pil_img)
+    h, w, _ = img_np.shape
+
+    # Chuyển sang HSV để phân tích màu sắc
+    hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
+
+    # 1. Phát hiện GPLX dựa trên sắc màu vàng nhạt/kem đặc trưng
+    # Màu vàng trong HSV có dải H từ 15 đến 35
+    yellow_mask = cv2.inRange(hsv, (15, 30, 150), (35, 255, 255))
+    yellow_ratio = np.sum(yellow_mask > 0) / (h * w)
+
+    is_gplx = yellow_ratio > 0.25
+
+    # 2. Phân biệt mặt trước / mặt sau
+    # Mặt sau CCCD chứa chip điện tử hình chữ nhật màu vàng hoặc dấu vân tay tối màu
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+
+    # Mặt trước thường có ảnh chân dung bên trái (vùng tối/độ lệch chuẩn cao)
+    left_side = gray[:, : int(w * 0.4)]
+    right_side = gray[:, int(w * 0.6) :]
+
+    # Kiểm tra vết chip vàng mặt sau CCCD (xét nửa bên trái)
+    chip_mask = cv2.inRange(
+        hsv[: int(h * 0.8), : int(w * 0.5)], (15, 100, 100), (30, 255, 255)
+    )
+    has_chip = np.sum(chip_mask > 0) > (h * w * 0.005)
+
+    if is_gplx:
+        # Mặt trước GPLX thường chứa ảnh chân dung màu sắc phức tạp hơn mặt sau
+        if np.std(left_side) > np.std(right_side) + 5:
+            return "gplx_front"
+        else:
+            return "gplx_back"
+    else:
+        if has_chip:
+            return "cccd_back"
+        elif np.std(left_side) > np.std(right_side) + 3:
+            return "cccd_front"
+        else:
+            return "cccd_back"
+
+
 def add_card_row_to_doc(doc, pil_front, pil_back, is_last=False):
-    """Thêm 1 hàng gồm 2 mặt nằm ngang vào file Word (Không chữ)."""
+    """Thêm 1 hàng 2 mặt nằm ngang vào file Word (Không chữ)."""
     buf_front = io.BytesIO()
     pil_front.save(buf_front, format="JPEG", quality=90)
     buf_front.seek(0)
@@ -108,7 +150,6 @@ def add_card_row_to_doc(doc, pil_front, pil_back, is_last=False):
     p_right = cell_right.paragraphs[0]
     p_right.add_run().add_picture(buf_back, width=Inches(3.37))
 
-    # Bỏ đường viền của bảng
     for row in table.rows:
         for cell in row.cells:
             tcPr = cell._tc.get_or_add_tcPr()
@@ -119,7 +160,6 @@ def add_card_row_to_doc(doc, pil_front, pil_back, is_last=False):
                 tcBorders.append(border)
             tcPr.append(tcBorders)
 
-    # Thêm khoảng trống giữa 2 hàng thẻ
     if not is_last:
         p_space = doc.add_paragraph()
         p_space.paragraph_format.space_before = Pt(20)
@@ -127,9 +167,7 @@ def add_card_row_to_doc(doc, pil_front, pil_back, is_last=False):
 
 
 def create_docx_combined(cards_data):
-    """Tạo file Word (.docx) chứa thuần ảnh CCCD và GPLX (không tiêu đề)."""
     doc = docx.Document()
-
     for section in doc.sections:
         section.top_margin = Inches(0.6)
         section.bottom_margin = Inches(0.6)
@@ -146,56 +184,91 @@ def create_docx_combined(cards_data):
     return doc_io
 
 
-# Giao diện tải ảnh
-st.subheader("1. Ảnh Căn cước công dân (CCCD)")
-col1, col2 = st.columns(2)
-with col1:
-    cccd_front_file = st.file_uploader(
-        "Mặt trước CCCD", type=["jpg", "jpeg", "png"], key="cccd_front"
-    )
-with col2:
-    cccd_back_file = st.file_uploader(
-        "Mặt sau CCCD", type=["jpg", "jpeg", "png"], key="cccd_back"
-    )
+# Giao diện cho phép chọn 1 lúc nhiều ảnh
+uploaded_files = st.file_uploader(
+    "📁 Chọn hoặc Kéo thả 4 ảnh cùng lúc (2 mặt CCCD + 2 mặt GPLX):",
+    type=["jpg", "jpeg", "png"],
+    accept_multiple_files=True,
+)
 
-st.markdown("---")
-st.subheader("2. Ảnh Giấy phép lái xe (GPLX)")
-col3, col4 = st.columns(2)
-with col3:
-    gplx_front_file = st.file_uploader(
-        "Mặt trước GPLX", type=["jpg", "jpeg", "png"], key="gplx_front"
-    )
-with col4:
-    gplx_back_file = st.file_uploader(
-        "Mặt sau GPLX", type=["jpg", "jpeg", "png"], key="gplx_back"
-    )
+if uploaded_files:
+    if len(uploaded_files) < 4:
+        st.warning(
+            f"⚠️ Bạn đã tải lên {len(uploaded_files)}/4 ảnh. Vui lòng chọn đủ 4 ảnh để ghép."
+        )
+    else:
+        with st.spinner("Đang tự động nhận diện từng loại giấy tờ..."):
+            classified = {}
 
-if cccd_front_file and cccd_back_file and gplx_front_file and gplx_back_file:
-    with st.spinner("Đang tự động tách nền & tối ưu tốc độ..."):
-        # Đọc & thu nhỏ kích thước nếu quá nặng
-        raw_cccd_f = resize_image_if_large(
-            Image.open(cccd_front_file).convert("RGB")
-        )
-        raw_cccd_b = resize_image_if_large(
-            Image.open(cccd_back_file).convert("RGB")
-        )
-        raw_gplx_f = resize_image_if_large(
-            Image.open(gplx_front_file).convert("RGB")
-        )
-        raw_gplx_b = resize_image_if_large(
-            Image.open(gplx_back_file).convert("RGB")
-        )
+            # Đọc & cắt viền từng ảnh trước
+            cropped_images = []
+            for f in uploaded_files[:4]:
+                raw_img = resize_image_if_large(
+                    Image.open(f).convert("RGB")
+                )
+                cropped_np = crop_card(np.array(raw_img))
+                cropped_pil = Image.fromarray(cropped_np)
 
-        # Tách nền cắt viền
-        pil_cccd_f = Image.fromarray(crop_card(np.array(raw_cccd_f)))
-        pil_cccd_b = Image.fromarray(crop_card(np.array(raw_cccd_b)))
-        pil_gplx_f = Image.fromarray(crop_card(np.array(raw_gplx_f)))
-        pil_gplx_b = Image.fromarray(crop_card(np.array(raw_gplx_b)))
+                # Phân loại
+                card_type = classify_card(cropped_pil)
+                classified[card_type] = cropped_pil
+
+            # Kiểm tra xem có đủ 4 loại mặt không
+            required_keys = [
+                "cccd_front",
+                "cccd_back",
+                "gplx_front",
+                "gplx_back",
+            ]
+            missing_keys = [k for k in required_keys if k not in classified]
+
+            # Nếu nhận diện tự động bị nhầm do ảnh chụp quá mờ, tự động gán theo thứ tự
+            if missing_keys:
+                sorted_files = [
+                    Image.fromarray(crop_card(np.array(resize_image_if_large(Image.open(f).convert("RGB")))))
+                    for f in uploaded_files[:4]
+                ]
+                classified = {
+                    "cccd_front": sorted_files[0],
+                    "cccd_back": sorted_files[1],
+                    "gplx_front": sorted_files[2],
+                    "gplx_back": sorted_files[3],
+                }
+
+        st.markdown("---")
+        st.subheader("📸 Kết quả tự động phân loại & cắt viền")
+        r1_c1, r1_c2, r2_c1, r2_c2 = st.columns(4)
+        r1_c1.image(
+            classified["cccd_front"],
+            caption="CCCD Mặt trước",
+            use_container_width=True,
+        )
+        r1_c2.image(
+            classified["cccd_back"],
+            caption="CCCD Mặt sau",
+            use_container_width=True,
+        )
+        r2_c1.image(
+            classified["gplx_front"],
+            caption="GPLX Mặt trước",
+            use_container_width=True,
+        )
+        r2_c2.image(
+            classified["gplx_back"],
+            caption="GPLX Mặt sau",
+            use_container_width=True,
+        )
 
         # Ghép File Word (.docx)
         cards_data = [
-            {"front": pil_cccd_f, "back": pil_cccd_b},
-            {"front": pil_gplx_f, "back": pil_gplx_b},
+            {
+                "front": classified["cccd_front"],
+                "back": classified["cccd_back"],
+            },
+            {
+                "front": classified["gplx_front"],
+                "back": classified["gplx_back"],
+            },
         ]
         docx_bytes = create_docx_combined(cards_data).getvalue()
 
@@ -209,6 +282,10 @@ if cccd_front_file and cccd_back_file and gplx_front_file and gplx_back_file:
         x_back = x_front + target_w + gap_x
 
         # CCCD
+        pil_cccd_f, pil_cccd_b = (
+            classified["cccd_front"],
+            classified["cccd_back"],
+        )
         r_cccd_f = target_w / pil_cccd_f.width
         cccd_f_res = pil_cccd_f.resize(
             (target_w, int(pil_cccd_f.height * r_cccd_f))
@@ -223,6 +300,10 @@ if cccd_front_file and cccd_back_file and gplx_front_file and gplx_back_file:
         canvas.paste(cccd_b_res, (x_back, y_cccd))
 
         # GPLX
+        pil_gplx_f, pil_gplx_b = (
+            classified["gplx_front"],
+            classified["gplx_back"],
+        )
         r_gplx_f = target_w / pil_gplx_f.width
         gplx_f_res = pil_gplx_f.resize(
             (target_w, int(pil_gplx_f.height * r_gplx_f))
@@ -240,34 +321,26 @@ if cccd_front_file and cccd_back_file and gplx_front_file and gplx_back_file:
         canvas.save(img_io, format="JPEG", quality=90)
         img_bytes = img_io.getvalue()
 
-    st.markdown("---")
-    st.subheader("📸 Kết quả cắt từng mặt")
-    r1_c1, r1_c2, r2_c1, r2_c2 = st.columns(4)
-    r1_c1.image(pil_cccd_f, caption="CCCD Trước", use_container_width=True)
-    r1_c2.image(pil_cccd_b, caption="CCCD Sau", use_container_width=True)
-    r2_c1.image(pil_gplx_f, caption="GPLX Trước", use_container_width=True)
-    r2_c2.image(pil_gplx_b, caption="GPLX Sau", use_container_width=True)
-
-    st.markdown("---")
-    st.subheader("📄 Xem trước Trang in A4")
-    st.image(
-        canvas, width=450, caption="Trang A4 chứa cả CCCD và GPLX sẵn sàng để in"
-    )
-
-    btn1, btn2 = st.columns(2)
-    with btn1:
-        st.download_button(
-            label="📝 Tải file WORD (.docx)",
-            data=docx_bytes,
-            file_name="CCCD_va_GPLX_in_A4.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            use_container_width=True,
+        st.markdown("---")
+        st.subheader("📄 Xem trước Trang in A4")
+        st.image(
+            canvas, width=450, caption="Trang A4 ghép hoàn chỉnh sẵn sàng để in"
         )
-    with btn2:
-        st.download_button(
-            label="🖼️ Tải file ÁNH (.jpg)",
-            data=img_bytes,
-            file_name="CCCD_va_GPLX_in_A4.jpg",
-            mime="image/jpeg",
-            use_container_width=True,
-        )
+
+        btn1, btn2 = st.columns(2)
+        with btn1:
+            st.download_button(
+                label="📝 Tải file WORD (.docx)",
+                data=docx_bytes,
+                file_name="CCCD_va_GPLX_in_A4.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+        with btn2:
+            st.download_button(
+                label="🖼️ Tải file ÁNH (.jpg)",
+                data=img_bytes,
+                file_name="CCCD_va_GPLX_in_A4.jpg",
+                mime="image/jpeg",
+                use_container_width=True,
+            )
