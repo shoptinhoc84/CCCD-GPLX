@@ -4,7 +4,7 @@ import docx
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.shared import Inches, Pt
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw
 import streamlit as st
 
 # 1. CẤU HÌNH TRANG
@@ -34,9 +34,8 @@ st.markdown(
 )
 
 
-# 2. XỬ LÝ ẢNH & THUẬT TOÁN TÁCH THẺ MỞ RỘNG VIỀN
+# 2. XỬ LÝ ẢNH & TÁCH THẺ AN TOÀN (GIỮ NGUYÊN GÓC)
 def load_and_fix_orientation(file):
-    """Sửa lỗi xoay góc EXIF từ camera điện thoại & nén dung lượng chống tràn RAM."""
     img = Image.open(file)
     img = ImageOps.exif_transpose(img).convert("RGB")
     w, h = img.size
@@ -50,10 +49,7 @@ def load_and_fix_orientation(file):
 
 
 def smart_crop_and_split(pil_img):
-    """
-    Tự động phát hiện, cắt viền và tách riêng các thẻ.
-    Đã tăng khoảng đệm (Padding = 12px) để không bị xém/mất 4 góc bo tròn của thẻ.
-    """
+    """Cắt viền tự động với vùng đệm rộng rãi (padding = 20px) để bảo toàn tuyệt đối 4 góc thẻ."""
     img_np = np.array(pil_img)
     h_img, w_img, _ = img_np.shape
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
@@ -103,8 +99,8 @@ def smart_crop_and_split(pil_img):
 
     if len(filtered) >= 1:
         results = []
-        # Tăng Padding thêm 12px để bảo toàn 4 góc bo tròn
-        pad = 12
+        # Tăng Padding lên 20px để dư lề, không bị mất góc bo tròn
+        pad = 20
         for x, y, w, h, _ in filtered:
             x_pad = max(0, x - pad)
             y_pad = max(0, y - pad)
@@ -125,9 +121,24 @@ def smart_crop_and_split(pil_img):
     return [pil_img]
 
 
+def add_rounded_corners(pil_img, radius=16):
+    """Bo tròn 4 góc ảnh thẻ tự động giống hệt thẻ thật ngoài đời thực."""
+    img = pil_img.convert("RGBA")
+    # Tạo mặt nạ bo góc
+    mask = Image.new("L", img.size, 0)
+    draw = ImageDraw.Draw(mask)
+    draw.rounded_rectangle([(0, 0), img.size], radius=radius, fill=255)
+
+    # Áp dụng mặt nạ vào ảnh
+    result = Image.new("RGBA", img.size, (255, 255, 255, 0))
+    result.paste(img, (0, 0), mask=mask)
+    return result.convert("RGB")
+
+
 def standardize_card_size(pil_img, target_w=856, target_h=540):
-    """Ép tất cả thẻ cắt ra về chuẩn tỷ lệ thực tế ISO 85.6mm x 53.98mm để không bao giờ bị lệch."""
-    return pil_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+    """Chuẩn hóa kích thước ISO & bo tròn 4 góc hoàn hảo."""
+    resized = pil_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+    return add_rounded_corners(resized, radius=24)
 
 
 def create_docx_dynamic(cards_rows, space_between=20):
@@ -191,7 +202,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="sub-title">Cắt viền & ghép A4 chuyên nghiệp (Chuẩn kích thước ISO)</div>',
+    '<div class="sub-title">Cắt viền an toàn & Bo góc thẻ chuẩn ISO</div>',
     unsafe_allow_html=True,
 )
 
@@ -202,14 +213,13 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    with st.spinner("✨ Đang tự động xử lý và chuẩn hóa kích thước..."):
+    with st.spinner("✨ Đang tự động xử lý và bảo toàn 4 góc thẻ..."):
         images_cropped = []
         for f in uploaded_files:
             raw_img = load_and_fix_orientation(f)
             extracted_cards = smart_crop_and_split(raw_img)
 
             for card in extracted_cards:
-                # Chuẩn hóa về kích thước ISO chuẩn
                 card_std = standardize_card_size(card)
 
                 if draw_border:
@@ -224,7 +234,7 @@ if uploaded_files:
                 images_cropped.append(card_std)
 
     st.markdown("---")
-    st.markdown("### 📸 Các mặt thẻ đã được bóc tách & Chuẩn hóa")
+    st.markdown("### 📸 Các mặt thẻ đã được chuẩn hóa & Bo góc")
 
     cols = st.columns(len(images_cropped))
     for idx, img in enumerate(images_cropped):
@@ -252,7 +262,7 @@ if uploaded_files:
         b_img = images_cropped[i + 1] if i + 1 < len(images_cropped) else None
         cards_rows.append({"front": f_img, "back": b_img})
 
-    # DỰNG KHUNG A4 CHUẨN TỶ LỆ
+    # DỰNG KHUNG A4
     a4_w, a4_h = 1240, 1754
     canvas = Image.new("RGB", (a4_w, a4_h), "#ffffff")
 
