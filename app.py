@@ -4,23 +4,23 @@ import docx
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.shared import Inches, Pt
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 import streamlit as st
 
-# 1. CẤU HÌNH TRANG & CUSTOM CSS
+# 1. CẤU HÌNH TRANG
 st.set_page_config(
     page_title="Photo Doc Pro - Ghép Giấy Tờ A4",
     page_icon="📄",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 st.markdown(
     """
     <style>
     .main { background-color: #f8f9fa; }
-    .main-title { color: #0f172a; font-weight: 800; font-size: 2.2rem; margin-bottom: 0.2rem; }
-    .sub-title { color: #475569; font-size: 1.05rem; margin-bottom: 2rem; }
+    .main-title { color: #0f172a; font-weight: 800; font-size: 1.8rem; margin-bottom: 0.2rem; }
+    .sub-title { color: #475569; font-size: 0.95rem; margin-bottom: 1.5rem; }
     
     div.stDownloadButton > button {
         width: 100%; border-radius: 8px; height: 48px; font-weight: 600; font-size: 1rem;
@@ -34,72 +34,99 @@ st.markdown(
 )
 
 
-# 2. XỬ LÝ CẮT ẢNH
-def resize_image_if_large(pil_img, max_dim=1200):
-    w, h = pil_img.size
+# 2. CHUẨN HÓA ẢNH ĐIỆN THOẠI & SỬA GÓC XOAY EXIF
+def load_and_fix_orientation(file):
+    """Xử lý góc xoay tự động theo camera điện thoại và giảm dung lượng tránh ngốn RAM."""
+    img = Image.open(file)
+    img = ImageOps.exif_transpose(img).convert("RGB")
+
+    w, h = img.size
+    max_dim = 1200
     if max(w, h) > max_dim:
         scale = max_dim / float(max(w, h))
-        return pil_img.resize(
+        img = img.resize(
             (int(w * scale), int(h * scale)), Image.Resampling.LANCZOS
         )
-    return pil_img
+    return img
 
 
-def crop_card(image_np):
-    """Cắt viền tự động, không lẹm chữ."""
-    h_img, w_img, _ = image_np.shape
-    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+def smart_crop_and_split(pil_img):
+    """
+    Thuật toán tự bóc tách thông minh:
+    - Nhận diện và cắt viền mép thẻ chuẩn xác.
+    - Tự xé đôi nếu là ảnh VNeID / ảnh dính liền 2 mặt dọc.
+    """
+    img_np = np.array(pil_img)
+    h_img, w_img, _ = img_np.shape
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
+
     _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    thresh_inv = cv2.bitwise_not(thresh)
+    edges = cv2.Canny(blur, 30, 150)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    combined_mask = cv2.dilate(
+        cv2.bitwise_or(edges, thresh_inv), kernel, iterations=1
+    )
 
     contours, _ = cv2.findContours(
-        thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
+        combined_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
     )
-    best_rect, max_area = None, 0
 
+    card_boxes = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area > (w_img * h_img * 0.10):
+        if area > (w_img * h_img * 0.04):
             x, y, w, h = cv2.boundingRect(cnt)
             aspect_ratio = float(w) / h
-            if 1.2 <= aspect_ratio <= 1.9 and (w < w_img * 0.98):
-                if area > max_area:
-                    max_area = area
-                    best_rect = (x, y, w, h)
+            if (
+                1.2 <= aspect_ratio <= 1.85
+                and w < w_img * 0.98
+                and h < h_img * 0.98
+            ):
+                card_boxes.append((x, y, w, h, area))
 
-    if best_rect:
-        x, y, w, h = best_rect
-        x = max(0, x - 8)
-        y = max(0, y - 8)
-        w = min(w_img - x, w + 16)
-        h = min(h_img - y, h + 16)
-        return image_np[y : y + h, x : x + w]
+    # Lọc bỏ khung trùng lặp
+    card_boxes = sorted(card_boxes, key=lambda b: b[4], reverse=True)
+    filtered = []
+    for box in card_boxes:
+        x, y, w, h, a = box
+        overlap = False
+        for fx, fy, fw, fh, fa in filtered:
+            dx = max(0, min(x + w, fx + fw) - max(x, fx))
+            dy = max(0, min(y + h, fy + fh) - max(y, fy))
+            if (dx * dy) > 0.4 * min(w * h, fw * fh):
+                overlap = True
+                break
+        if not overlap:
+            filtered.append(box)
 
-    edges = cv2.Canny(blur, 30, 150)
-    contours, _ = cv2.findContours(
-        edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
-    if contours:
-        valid_cnts = [
-            c
-            for c in contours
-            if cv2.contourArea(c) < (w_img * h_img * 0.95)
-            and cv2.contourArea(c) > (w_img * h_img * 0.08)
-        ]
-        if valid_cnts:
-            c = max(valid_cnts, key=cv2.contourArea)
-            x, y, w, h = cv2.boundingRect(c)
-            x = max(0, x - 5)
-            y = max(0, y - 5)
-            w = min(w_img - x, w + 10)
-            h = min(h_img - y, h + 10)
-            return image_np[y : y + h, x : x + w]
+    filtered = sorted(filtered, key=lambda b: b[1])
 
-    return image_np
+    if len(filtered) >= 1:
+        results = []
+        for x, y, w, h, _ in filtered:
+            x_pad, y_pad = max(0, x - 5), max(0, y - 5)
+            w_pad = min(w_img - x_pad, w + 10)
+            h_pad = min(h_img - y_pad, h + 10)
+            cropped = Image.fromarray(
+                img_np[y_pad : y_pad + h_pad, x_pad : x_pad + w_pad]
+            )
+            results.append(cropped)
+        return results
+
+    # Fallback cho ảnh chụp màn hình VNeID dạng dọc
+    if (h_img / float(w_img)) > 1.15:
+        half_h = h_img // 2
+        top_half = Image.fromarray(img_np[0:half_h, :])
+        bottom_half = Image.fromarray(img_np[half_h:h_img, :])
+        return [top_half, bottom_half]
+
+    return [pil_img]
 
 
 def create_docx_dynamic(cards_rows, space_between=20):
-    """Tạo file Word (.docx) chuẩn lề A4."""
     doc = docx.Document()
     for section in doc.sections:
         section.top_margin = Inches(0.6)
@@ -109,9 +136,9 @@ def create_docx_dynamic(cards_rows, space_between=20):
 
     for idx, item in enumerate(cards_rows):
         buf_f, buf_b = io.BytesIO(), io.BytesIO()
-        item["front"].save(buf_f, format="JPEG", quality=92)
+        item["front"].save(buf_f, format="JPEG", quality=90)
         if item["back"]:
-            item["back"].save(buf_b, format="JPEG", quality=92)
+            item["back"].save(buf_b, format="JPEG", quality=90)
             buf_b.seek(0)
         buf_f.seek(0)
 
@@ -153,10 +180,6 @@ with st.sidebar:
     st.markdown("### ⚙️ Cấu hình Trang In")
     space_val = st.slider("Khoảng cách giữa các hàng (px):", 60, 200, 120, 10)
     draw_border = st.checkbox("Thêm viền mỏng quanh thẻ khi in", value=False)
-    st.markdown("---")
-    st.info(
-        "💡 **Cách dùng:** Kéo thả từ **1 đến 4 ảnh** bất kỳ. Hệ thống tự động cắt viền và xếp đều 2 mặt nằm ngang trên A4!"
-    )
 
 # 4. GIAO DIỆN CHÍNH
 st.markdown(
@@ -164,51 +187,47 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="sub-title">Tự động cắt viền & ghép giấy tờ nằm ngang in A4</div>',
+    '<div class="sub-title">Cắt viền & ghép A4 chuyên nghiệp trên Điện thoại/PC</div>',
     unsafe_allow_html=True,
 )
 
 uploaded_files = st.file_uploader(
-    "📥 Tải ảnh lên (Chọn từ 1 đến 4 ảnh):",
+    "📥 Chụp trực tiếp hoặc chọn ảnh từ điện thoại:",
     type=["jpg", "jpeg", "png"],
     accept_multiple_files=True,
 )
 
 if uploaded_files:
-    with st.spinner("✨ Đang tự động tách nền và cắt viền..."):
+    with st.spinner("✨ Đang tự động xử lý và cắt viền..."):
         images_cropped = []
         for f in uploaded_files:
-            raw_img = resize_image_if_large(Image.open(f).convert("RGB"))
-            cropped_np = crop_card(np.array(raw_img))
-            cropped_pil = Image.fromarray(cropped_np)
+            raw_img = load_and_fix_orientation(f)
+            extracted_cards = smart_crop_and_split(raw_img)
 
-            if draw_border:
-                img_border = Image.new(
-                    "RGB",
-                    (cropped_pil.width + 4, cropped_pil.height + 4),
-                    "#cbd5e1",
-                )
-                img_border.paste(cropped_pil, (2, 2))
-                cropped_pil = img_border
+            for card in extracted_cards:
+                if draw_border:
+                    img_border = Image.new(
+                        "RGB", (card.width + 4, card.height + 4), "#cbd5e1"
+                    )
+                    img_border.paste(card, (2, 2))
+                    card = img_border
+                images_cropped.append(card)
 
-            images_cropped.append(cropped_pil)
-
-    # Hiển thị kết quả đã cắt
     st.markdown("---")
-    st.markdown("### 📸 Các ảnh đã được tự động cắt viền")
-    cols = st.columns(len(images_cropped))
+    st.markdown("### 📸 Các mặt thẻ đã được bóc tách")
+
+    num_imgs = len(images_cropped)
+    cols = st.columns(min(num_imgs, 2))
     for idx, img in enumerate(images_cropped):
-        with cols[idx]:
-            st.caption(f"Ảnh {idx+1}")
+        with cols[idx % 2]:
+            st.caption(f"Mặt {idx+1}")
             st.image(img, use_container_width=True)
 
-    # Cho phép đảo vị trí nếu cần
     swap = False
     if len(images_cropped) >= 2:
         swap = st.checkbox("🔄 Đảo vị trí Trái ↔ Phải (Đổi vị trí 2 mặt)")
 
     if swap:
-        # Đảo thứ tự theo cặp 2 ảnh
         new_imgs = []
         for i in range(0, len(images_cropped), 2):
             pair = images_cropped[i : i + 2]
@@ -218,14 +237,13 @@ if uploaded_files:
                 new_imgs.extend(pair)
         images_cropped = new_imgs
 
-    # Nhóm thành các hàng 2 ảnh (Hàng 1: Ảnh 1-2, Hàng 2: Ảnh 3-4)
     cards_rows = []
     for i in range(0, len(images_cropped), 2):
         f_img = images_cropped[i]
         b_img = images_cropped[i + 1] if i + 1 < len(images_cropped) else None
         cards_rows.append({"front": f_img, "back": b_img})
 
-    # DỰNG CANVAS A4
+    # DỰNG KHUNG A4 CHUẨN
     a4_w, a4_h = 1240, 1754
     canvas = Image.new("RGB", (a4_w, a4_h), "#ffffff")
     target_w = 510
@@ -235,7 +253,6 @@ if uploaded_files:
 
     current_y = 160
     for row in cards_rows:
-        # Ảnh mặt bên trái
         f_res = row["front"].resize(
             (
                 target_w,
@@ -244,7 +261,6 @@ if uploaded_files:
         )
         canvas.paste(f_res, (x_front, current_y))
 
-        # Ảnh mặt bên phải (nếu có)
         if row["back"]:
             b_res = row["back"].resize(
                 (
@@ -256,40 +272,35 @@ if uploaded_files:
 
         current_y += f_res.height + space_val
 
-    # Tạo dữ liệu tải về
     docx_bytes = create_docx_dynamic(
         cards_rows, space_between=space_val
     ).getvalue()
 
     img_io = io.BytesIO()
-    canvas.save(img_io, format="JPEG", quality=92)
+    canvas.save(img_io, format="JPEG", quality=90)
     img_bytes = img_io.getvalue()
 
     st.markdown("---")
-    p_col1, p_col2 = st.columns([1.2, 1])
+    st.markdown("### 📄 Bản xem trước trang A4")
+    st.image(
+        canvas, use_container_width=True, caption="Trang A4 sẵn sàng để in"
+    )
 
-    with p_col1:
-        st.markdown("### 📄 Bản xem trước trang A4")
-        st.image(
-            canvas,
-            use_container_width=True,
-            caption="Trang A4 sẵn sàng để in",
-        )
-
-    with p_col2:
-        st.markdown("### 📥 Tải file kết quả")
-        st.write("File đã được xếp chuẩn lề in thực tế:")
-
+    st.markdown("### 📥 Tải file kết quả")
+    btn1, btn2 = st.columns(2)
+    with btn1:
         st.download_button(
             label="📝 Tải file WORD (.docx)",
             data=docx_bytes,
             file_name="Photo_GiayTo_A4.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
         )
-        st.write("")
+    with btn2:
         st.download_button(
             label="🖼️ Tải file ÁNH (.jpg)",
             data=img_bytes,
             file_name="Photo_GiayTo_A4.jpg",
             mime="image/jpeg",
+            use_container_width=True,
         )
