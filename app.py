@@ -34,7 +34,7 @@ st.markdown(
 )
 
 
-# 2. XỬ LÝ ẢNH & THUẬT TOÁN TÁCH THẺ THÔNG MINH
+# 2. XỬ LÝ ẢNH & THUẬT TOÁN TÁCH THẺ MỞ RỘNG VIỀN
 def load_and_fix_orientation(file):
     """Sửa lỗi xoay góc EXIF từ camera điện thoại & nén dung lượng chống tràn RAM."""
     img = Image.open(file)
@@ -50,7 +50,10 @@ def load_and_fix_orientation(file):
 
 
 def smart_crop_and_split(pil_img):
-    """Tự động phát hiện, cắt viền và tách riêng các thẻ (Kể cả ảnh chụp VNeID 2 mặt)."""
+    """
+    Tự động phát hiện, cắt viền và tách riêng các thẻ.
+    Đã tăng khoảng đệm (Padding = 12px) để không bị xém/mất 4 góc bo tròn của thẻ.
+    """
     img_np = np.array(pil_img)
     h_img, w_img, _ = img_np.shape
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
@@ -100,10 +103,13 @@ def smart_crop_and_split(pil_img):
 
     if len(filtered) >= 1:
         results = []
+        # Tăng Padding thêm 12px để bảo toàn 4 góc bo tròn
+        pad = 12
         for x, y, w, h, _ in filtered:
-            x_pad, y_pad = max(0, x - 3), max(0, y - 3)
-            w_pad = min(w_img - x_pad, w + 6)
-            h_pad = min(h_img - y_pad, h + 6)
+            x_pad = max(0, x - pad)
+            y_pad = max(0, y - pad)
+            w_pad = min(w_img - x_pad, w + (pad * 2))
+            h_pad = min(h_img - y_pad, h + (pad * 2))
             cropped = Image.fromarray(
                 img_np[y_pad : y_pad + h_pad, x_pad : x_pad + w_pad]
             )
