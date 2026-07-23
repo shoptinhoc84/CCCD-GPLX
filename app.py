@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 import streamlit as st
 
-# 1. CẤU HÌNH TRANG & CUSTOM CSS
+# 1. CẤU HÌNH TRANG & CUSTOM CSS (DESIGN SYSTEM)
 st.set_page_config(
     page_title="Photo Doc Pro - Ghép Giấy Tờ Tự Động",
     page_icon="📄",
@@ -30,6 +30,7 @@ st.markdown(
     
     div.stDownloadButton > button {
         width: 100%; border-radius: 8px; height: 48px; font-weight: 600; font-size: 1rem;
+        transition: all 0.2s ease;
     }
     div.stDownloadButton > button:first-child { background-color: #2563eb; color: white; border: none; }
     div.stDownloadButton > button:first-child:hover { background-color: #1d4ed8; }
@@ -39,8 +40,9 @@ st.markdown(
 )
 
 
-# 2. HÀM XỬ LÝ ẢNH
+# 2. CÁC HÀM XỬ LÝ ẢNH & NHẬN DIỆN THÔNG MINH
 def resize_image_if_large(pil_img, max_dim=1200):
+    """Giảm kích thước ảnh đầu vào để xử lý siêu nhanh & tránh quá tải RAM."""
     w, h = pil_img.size
     if max(w, h) > max_dim:
         scale = max_dim / float(max(w, h))
@@ -51,7 +53,7 @@ def resize_image_if_large(pil_img, max_dim=1200):
 
 
 def crop_card(image_np):
-    """Cắt viền tự động dùng thuật toán nhận diện chữ nhật chuẩn."""
+    """Cắt viền tự động sử dụng thuật toán nhận diện hình chữ nhật chuẩn."""
     h_img, w_img, _ = image_np.shape
     gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -98,7 +100,7 @@ def crop_card(image_np):
 
 
 def classify_card(pil_img):
-    """Phân loại tự động các mặt giấy tờ."""
+    """Phân loại tự động các mặt giấy tờ (CCCD / GPLX)."""
     img_np = np.array(pil_img)
     h, w, _ = img_np.shape
     hsv = cv2.cvtColor(img_np, cv2.COLOR_RGB2HSV)
@@ -132,7 +134,7 @@ def classify_card(pil_img):
 
 
 def create_docx_dynamic(cards_rows, space_between=20):
-    """Tạo file Word động dựa trên danh sách các hàng thẻ."""
+    """Tạo file Word (.docx) chuẩn lề A4, không đường viền bảng."""
     doc = docx.Document()
     for section in doc.sections:
         section.top_margin = Inches(0.6)
@@ -159,11 +161,12 @@ def create_docx_dynamic(cards_rows, space_between=20):
                 buf_b, width=Inches(3.37)
             )
 
+        # Xóa đường viền của bảng
         for row in table.rows:
             for cell in row.cells:
                 tcPr = cell._tc.get_or_add_tcPr()
                 tcBorders = docx.oxml.OxmlElement("w:tcBorders")
-                for b_name in ["top", "left", "bottom", "right"]:
+                for border_name in ["top", "left", "bottom", "right"]:
                     border = docx.oxml.OxmlElement(f"w:{border_name}")
                     border.set(docx.oxml.ns.qn("w:val"), "none")
                     tcBorders.append(border)
@@ -180,7 +183,7 @@ def create_docx_dynamic(cards_rows, space_between=20):
     return doc_io
 
 
-# 3. SIDEBAR
+# 3. SIDEBAR CẤU HÌNH
 with st.sidebar:
     st.image(
         "https://img.icons8.com/fluency/96/print.png", width=64
@@ -192,10 +195,10 @@ with st.sidebar:
     draw_border = st.checkbox("Thêm viền mỏng quanh thẻ khi in", value=False)
     st.markdown("---")
     st.info(
-        "💡 **Cách dùng:** Kéo thả từ **1 đến 4 ảnh** bất kỳ (CCCD hoặc GPLX). Hệ thống tự cắt viền và xếp trang A4!"
+        "💡 **Hướng dẫn:** Kéo thả từ **1 đến 4 ảnh** bất kỳ (CCCD hoặc GPLX). Hệ thống sẽ tự cắt viền và xếp đều lên trang A4!"
     )
 
-# 4. GIAO DIỆN CHÍNH
+# 4. GIAO DIỆN CHÍNH (MAIN CONTENT)
 st.markdown(
     '<div class="main-title">📄 Smart Photo Paper A4</div>',
     unsafe_allow_html=True,
@@ -241,7 +244,6 @@ if uploaded_files:
             x for x in processed_imgs if x["type"].startswith("gplx")
         ]
 
-        # Xây dựng danh sách hàng cần in
         cards_rows = []
 
         # Nếu có CCCD
@@ -268,7 +270,7 @@ if uploaded_files:
             )
             cards_rows.append({"label": "GPLX", "front": f_img, "back": b_img})
 
-        # Nếu cả 2 danh sách trên trống (do nhận diện nhầm), lấy theo thứ tự cặp
+        # Dự phòng gán cặp ảnh nếu phân loại nhầm
         if not cards_rows:
             for i in range(0, len(processed_imgs), 2):
                 f_img = processed_imgs[i]["img"]
