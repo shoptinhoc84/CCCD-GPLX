@@ -34,8 +34,9 @@ st.markdown(
 )
 
 
-# 2. XỬ LÝ ẢNH & CHUẨN HÓA KÍCH THƯỚC BẰNG NHAU
+# 2. XỬ LÝ ẢNH & THUẬT TOÁN TÁCH THẺ THÔNG MINH
 def load_and_fix_orientation(file):
+    """Sửa lỗi xoay góc EXIF từ camera điện thoại & nén dung lượng chống tràn RAM."""
     img = Image.open(file)
     img = ImageOps.exif_transpose(img).convert("RGB")
     w, h = img.size
@@ -48,10 +49,11 @@ def load_and_fix_orientation(file):
     return img
 
 
-def crop_card(image_np):
-    """Cắt viền tự động dùng threshold + Canny."""
-    h_img, w_img, _ = image_np.shape
-    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+def smart_crop_and_split(pil_img):
+    """Tự động phát hiện, cắt viền và tách riêng các thẻ (Kể cả ảnh chụp VNeID 2 mặt)."""
+    img_np = np.array(pil_img)
+    h_img, w_img, _ = img_np.shape
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
     _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -118,11 +120,12 @@ def crop_card(image_np):
 
 
 def standardize_card_size(pil_img, target_w=856, target_h=540):
-    """Ép ảnh về chuẩn kích thước thực tế ISO 85.6mm x 53.98mm để không bao giờ bị lệch."""
+    """Ép tất cả thẻ cắt ra về chuẩn tỷ lệ thực tế ISO 85.6mm x 53.98mm để không bao giờ bị lệch."""
     return pil_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
 
 def create_docx_dynamic(cards_rows, space_between=20):
+    """Tạo file Word (.docx) chuẩn lề in A4."""
     doc = docx.Document()
     for section in doc.sections:
         section.top_margin = Inches(0.6)
@@ -141,7 +144,6 @@ def create_docx_dynamic(cards_rows, space_between=20):
         table = doc.add_table(rows=1, cols=2)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
-        # Kích thước chuẩn ISO cho file Word (~8.56 x 5.4 cm)
         cell_f = table.cell(0, 0).paragraphs[0].add_run()
         cell_f.add_picture(buf_f, width=Inches(3.37), height=Inches(2.125))
 
@@ -170,7 +172,7 @@ def create_docx_dynamic(cards_rows, space_between=20):
     return doc_io
 
 
-# 3. SIDEBAR
+# 3. SIDEBAR CẤU HÌNH
 with st.sidebar:
     st.image("https://img.icons8.com/fluency/96/print.png", width=64)
     st.markdown("### ⚙️ Cấu hình Trang In")
@@ -201,7 +203,7 @@ if uploaded_files:
             extracted_cards = smart_crop_and_split(raw_img)
 
             for card in extracted_cards:
-                # Ép ảnh cắt ra về đúng tỷ lệ chuẩn ISO 85.6 x 53.98 mm
+                # Chuẩn hóa về kích thước ISO chuẩn
                 card_std = standardize_card_size(card)
 
                 if draw_border:
@@ -218,7 +220,6 @@ if uploaded_files:
     st.markdown("---")
     st.markdown("### 📸 Các mặt thẻ đã được bóc tách & Chuẩn hóa")
 
-    # Hiển thị 4 cột bằng nhau chuẩn xác
     cols = st.columns(len(images_cropped))
     for idx, img in enumerate(images_cropped):
         with cols[idx]:
@@ -249,7 +250,6 @@ if uploaded_files:
     a4_w, a4_h = 1240, 1754
     canvas = Image.new("RGB", (a4_w, a4_h), "#ffffff")
 
-    # Kích thước cố định hiển thị trên A4 (510 x 321 px)
     target_w, target_h = 510, 321
     gap_x = 50
     x_front = (a4_w - (target_w * 2 + gap_x)) // 2
