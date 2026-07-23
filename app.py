@@ -34,12 +34,10 @@ st.markdown(
 )
 
 
-# 2. XỬ LÝ ẢNH & CHUẨN HÓA GÓC XOAY
+# 2. XỬ LÝ ẢNH & CHUẨN HÓA KÍCH THƯỚC BẰNG NHAU
 def load_and_fix_orientation(file):
-    """Xử lý góc xoay tự động theo camera điện thoại và giảm dung lượng tránh ngốn RAM."""
     img = Image.open(file)
     img = ImageOps.exif_transpose(img).convert("RGB")
-
     w, h = img.size
     max_dim = 1200
     if max(w, h) > max_dim:
@@ -50,14 +48,10 @@ def load_and_fix_orientation(file):
     return img
 
 
-def smart_crop_and_split(pil_img):
-    """
-    Tự động quét & cắt viền thẻ.
-    Hỗ trợ cả ảnh rời lẫn ảnh chụp màn hình VNeID 2 mặt dính liền.
-    """
-    img_np = np.array(pil_img)
-    h_img, w_img, _ = img_np.shape
-    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+def crop_card(image_np):
+    """Cắt viền tự động dùng threshold + Canny."""
+    h_img, w_img, _ = image_np.shape
+    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
     _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -105,9 +99,9 @@ def smart_crop_and_split(pil_img):
     if len(filtered) >= 1:
         results = []
         for x, y, w, h, _ in filtered:
-            x_pad, y_pad = max(0, x - 5), max(0, y - 5)
-            w_pad = min(w_img - x_pad, w + 10)
-            h_pad = min(h_img - y_pad, h + 10)
+            x_pad, y_pad = max(0, x - 3), max(0, y - 3)
+            w_pad = min(w_img - x_pad, w + 6)
+            h_pad = min(h_img - y_pad, h + 6)
             cropped = Image.fromarray(
                 img_np[y_pad : y_pad + h_pad, x_pad : x_pad + w_pad]
             )
@@ -123,6 +117,11 @@ def smart_crop_and_split(pil_img):
     return [pil_img]
 
 
+def standardize_card_size(pil_img, target_w=856, target_h=540):
+    """Ép ảnh về chuẩn kích thước thực tế ISO 85.6mm x 53.98mm để không bao giờ bị lệch."""
+    return pil_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+
 def create_docx_dynamic(cards_rows, space_between=20):
     doc = docx.Document()
     for section in doc.sections:
@@ -133,23 +132,22 @@ def create_docx_dynamic(cards_rows, space_between=20):
 
     for idx, item in enumerate(cards_rows):
         buf_f, buf_b = io.BytesIO(), io.BytesIO()
-        item["front"].save(buf_f, format="JPEG", quality=90)
+        item["front"].save(buf_f, format="JPEG", quality=92)
         if item["back"]:
-            item["back"].save(buf_b, format="JPEG", quality=90)
+            item["back"].save(buf_b, format="JPEG", quality=92)
             buf_b.seek(0)
         buf_f.seek(0)
 
         table = doc.add_table(rows=1, cols=2)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
-        # Giữ nguyên tỷ lệ chuẩn của thẻ (Rộng 3.37 inches ~ 8.56 cm)
-        table.cell(0, 0).paragraphs[0].add_run().add_picture(
-            buf_f, width=Inches(3.37)
-        )
+        # Kích thước chuẩn ISO cho file Word (~8.56 x 5.4 cm)
+        cell_f = table.cell(0, 0).paragraphs[0].add_run()
+        cell_f.add_picture(buf_f, width=Inches(3.37), height=Inches(2.125))
+
         if item["back"]:
-            table.cell(0, 1).paragraphs[0].add_run().add_picture(
-                buf_b, width=Inches(3.37)
-            )
+            cell_b = table.cell(0, 1).paragraphs[0].add_run()
+            cell_b.add_picture(buf_b, width=Inches(3.37), height=Inches(2.125))
 
         for row in table.rows:
             for cell in row.cells:
@@ -172,7 +170,7 @@ def create_docx_dynamic(cards_rows, space_between=20):
     return doc_io
 
 
-# 3. SIDEBAR CẤU HÌNH
+# 3. SIDEBAR
 with st.sidebar:
     st.image("https://img.icons8.com/fluency/96/print.png", width=64)
     st.markdown("### ⚙️ Cấu hình Trang In")
@@ -185,7 +183,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="sub-title">Cắt viền & ghép A4 chuyên nghiệp trên Điện thoại/PC</div>',
+    '<div class="sub-title">Cắt viền & ghép A4 chuyên nghiệp (Chuẩn kích thước ISO)</div>',
     unsafe_allow_html=True,
 )
 
@@ -196,32 +194,36 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    with st.spinner("✨ Đang tự động xử lý và cắt viền..."):
+    with st.spinner("✨ Đang tự động xử lý và chuẩn hóa kích thước..."):
         images_cropped = []
         for f in uploaded_files:
             raw_img = load_and_fix_orientation(f)
             extracted_cards = smart_crop_and_split(raw_img)
 
             for card in extracted_cards:
+                # Ép ảnh cắt ra về đúng tỷ lệ chuẩn ISO 85.6 x 53.98 mm
+                card_std = standardize_card_size(card)
+
                 if draw_border:
                     img_border = Image.new(
-                        "RGB", (card.width + 4, card.height + 4), "#cbd5e1"
+                        "RGB",
+                        (card_std.width + 4, card_std.height + 4),
+                        "#cbd5e1",
                     )
-                    img_border.paste(card, (2, 2))
-                    card = img_border
-                images_cropped.append(card)
+                    img_border.paste(card_std, (2, 2))
+                    card_std = img_border
+
+                images_cropped.append(card_std)
 
     st.markdown("---")
-    st.markdown("### 📸 Các mặt thẻ đã được bóc tách")
+    st.markdown("### 📸 Các mặt thẻ đã được bóc tách & Chuẩn hóa")
 
-    # Hiển thị số cột linh hoạt trên Máy tính (tối đa 4 cột) để tránh méo ảnh
-    num_imgs = len(images_cropped)
-    cols = st.columns(min(num_imgs, 4))
+    # Hiển thị 4 cột bằng nhau chuẩn xác
+    cols = st.columns(len(images_cropped))
     for idx, img in enumerate(images_cropped):
-        with cols[idx % min(num_imgs, 4)]:
+        with cols[idx]:
             st.caption(f"Mặt {idx+1}")
-            # Đặt width=400 chuẩn giúp giữ đúng tỷ lệ góc ảnh gốc
-            st.image(img, width=380)
+            st.image(img, use_container_width=True)
 
     swap = False
     if len(images_cropped) >= 2:
@@ -243,35 +245,30 @@ if uploaded_files:
         b_img = images_cropped[i + 1] if i + 1 < len(images_cropped) else None
         cards_rows.append({"front": f_img, "back": b_img})
 
-    # DỰNG KHUNG A4 CHUẨN TỶ LỆ (1240 x 1754 px)
+    # DỰNG KHUNG A4 CHUẨN TỶ LỆ
     a4_w, a4_h = 1240, 1754
     canvas = Image.new("RGB", (a4_w, a4_h), "#ffffff")
-    target_w = 510
+
+    # Kích thước cố định hiển thị trên A4 (510 x 321 px)
+    target_w, target_h = 510, 321
     gap_x = 50
     x_front = (a4_w - (target_w * 2 + gap_x)) // 2
     x_back = x_front + target_w + gap_x
 
     current_y = 160
     for row in cards_rows:
-        # Giữ chính xác tỷ lệ Chiều rộng / Chiều cao gốc của thẻ
         f_res = row["front"].resize(
-            (
-                target_w,
-                int(row["front"].height * (target_w / row["front"].width)),
-            )
+            (target_w, target_h), Image.Resampling.LANCZOS
         )
         canvas.paste(f_res, (x_front, current_y))
 
         if row["back"]:
             b_res = row["back"].resize(
-                (
-                    target_w,
-                    int(row["back"].height * (target_w / row["back"].width)),
-                )
+                (target_w, target_h), Image.Resampling.LANCZOS
             )
             canvas.paste(b_res, (x_back, current_y))
 
-        current_y += f_res.height + space_val
+        current_y += target_h + space_val
 
     docx_bytes = create_docx_dynamic(
         cards_rows, space_between=space_val
