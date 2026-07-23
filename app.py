@@ -34,7 +34,7 @@ st.markdown(
 )
 
 
-# 2. CHUẨN HÓA ẢNH ĐIỆN THOẠI & SỬA GÓC XOAY EXIF
+# 2. XỬ LÝ ẢNH & CHUẨN HÓA GÓC XOAY
 def load_and_fix_orientation(file):
     """Xử lý góc xoay tự động theo camera điện thoại và giảm dung lượng tránh ngốn RAM."""
     img = Image.open(file)
@@ -52,9 +52,8 @@ def load_and_fix_orientation(file):
 
 def smart_crop_and_split(pil_img):
     """
-    Thuật toán tự bóc tách thông minh:
-    - Nhận diện và cắt viền mép thẻ chuẩn xác.
-    - Tự xé đôi nếu là ảnh VNeID / ảnh dính liền 2 mặt dọc.
+    Tự động quét & cắt viền thẻ.
+    Hỗ trợ cả ảnh rời lẫn ảnh chụp màn hình VNeID 2 mặt dính liền.
     """
     img_np = np.array(pil_img)
     h_img, w_img, _ = img_np.shape
@@ -87,7 +86,6 @@ def smart_crop_and_split(pil_img):
             ):
                 card_boxes.append((x, y, w, h, area))
 
-    # Lọc bỏ khung trùng lặp
     card_boxes = sorted(card_boxes, key=lambda b: b[4], reverse=True)
     filtered = []
     for box in card_boxes:
@@ -116,7 +114,6 @@ def smart_crop_and_split(pil_img):
             results.append(cropped)
         return results
 
-    # Fallback cho ảnh chụp màn hình VNeID dạng dọc
     if (h_img / float(w_img)) > 1.15:
         half_h = h_img // 2
         top_half = Image.fromarray(img_np[0:half_h, :])
@@ -145,6 +142,7 @@ def create_docx_dynamic(cards_rows, space_between=20):
         table = doc.add_table(rows=1, cols=2)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
+        # Giữ nguyên tỷ lệ chuẩn của thẻ (Rộng 3.37 inches ~ 8.56 cm)
         table.cell(0, 0).paragraphs[0].add_run().add_picture(
             buf_f, width=Inches(3.37)
         )
@@ -192,7 +190,7 @@ st.markdown(
 )
 
 uploaded_files = st.file_uploader(
-    "📥 Chụp trực tiếp hoặc chọn ảnh từ điện thoại:",
+    "📥 Chụp trực tiếp hoặc chọn ảnh từ thiết bị:",
     type=["jpg", "jpeg", "png"],
     accept_multiple_files=True,
 )
@@ -216,12 +214,14 @@ if uploaded_files:
     st.markdown("---")
     st.markdown("### 📸 Các mặt thẻ đã được bóc tách")
 
+    # Hiển thị số cột linh hoạt trên Máy tính (tối đa 4 cột) để tránh méo ảnh
     num_imgs = len(images_cropped)
-    cols = st.columns(min(num_imgs, 2))
+    cols = st.columns(min(num_imgs, 4))
     for idx, img in enumerate(images_cropped):
-        with cols[idx % 2]:
+        with cols[idx % min(num_imgs, 4)]:
             st.caption(f"Mặt {idx+1}")
-            st.image(img, use_container_width=True)
+            # Đặt width=400 chuẩn giúp giữ đúng tỷ lệ góc ảnh gốc
+            st.image(img, width=380)
 
     swap = False
     if len(images_cropped) >= 2:
@@ -243,7 +243,7 @@ if uploaded_files:
         b_img = images_cropped[i + 1] if i + 1 < len(images_cropped) else None
         cards_rows.append({"front": f_img, "back": b_img})
 
-    # DỰNG KHUNG A4 CHUẨN
+    # DỰNG KHUNG A4 CHUẨN TỶ LỆ (1240 x 1754 px)
     a4_w, a4_h = 1240, 1754
     canvas = Image.new("RGB", (a4_w, a4_h), "#ffffff")
     target_w = 510
@@ -253,6 +253,7 @@ if uploaded_files:
 
     current_y = 160
     for row in cards_rows:
+        # Giữ chính xác tỷ lệ Chiều rộng / Chiều cao gốc của thẻ
         f_res = row["front"].resize(
             (
                 target_w,
@@ -277,14 +278,12 @@ if uploaded_files:
     ).getvalue()
 
     img_io = io.BytesIO()
-    canvas.save(img_io, format="JPEG", quality=90)
+    canvas.save(img_io, format="JPEG", quality=92)
     img_bytes = img_io.getvalue()
 
     st.markdown("---")
     st.markdown("### 📄 Bản xem trước trang A4")
-    st.image(
-        canvas, use_container_width=True, caption="Trang A4 sẵn sàng để in"
-    )
+    st.image(canvas, width=500, caption="Trang A4 chuẩn tỉ lệ in ấn")
 
     st.markdown("### 📥 Tải file kết quả")
     btn1, btn2 = st.columns(2)
