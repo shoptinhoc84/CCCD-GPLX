@@ -1,7 +1,7 @@
 import io
 import cv2
 import docx
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.shared import Inches, Pt
 import numpy as np
 from PIL import Image
@@ -15,7 +15,7 @@ st.set_page_config(
 
 st.title("🖨️ Lọc viền & Ghép giấy tờ in A4")
 st.write(
-    "Hỗ trợ tự động cắt bỏ phần thừa và xuất file **Ảnh (PNG)** hoặc **Word (.docx)** sẵn sàng để in."
+    "Hỗ trợ tự động cắt bỏ phần thừa và xếp **Mặt trước - Mặt sau nằm ngang song song** sẵn sàng để in/photocopy."
 )
 
 
@@ -76,19 +76,18 @@ def crop_card(image_np):
     return image_np
 
 
-def create_docx(pil_front, pil_back):
-    """Tạo file Word (.docx) chứa 2 mặt giấy tờ căn giữa trên khổ A4."""
+def create_docx_horizontal(pil_front, pil_back):
+    """Tạo file Word (.docx) chứa 2 mặt giấy tờ nằm ngang hàng chuẩn khổ A4."""
     doc = docx.Document()
 
-    # Cấu hình lề trang A4 (Lề trên/dưới 2cm, trái/phải 2cm)
-    sections = doc.sections
-    for section in sections:
-        section.top_margin = Inches(0.8)
-        section.bottom_margin = Inches(0.8)
-        section.left_margin = Inches(0.8)
-        section.right_margin = Inches(0.8)
+    # Cấu hình lề trang A4 (Lề trên/dưới/trái/phải ~ 1.5 cm)
+    for section in doc.sections:
+        section.top_margin = Inches(0.6)
+        section.bottom_margin = Inches(0.6)
+        section.left_margin = Inches(0.6)
+        section.right_margin = Inches(0.6)
 
-    # Chuyển PIL Image sang Byte Stream để chèn vào Word
+    # Byte stream chuyển đổi ảnh
     buf_front = io.BytesIO()
     pil_front.save(buf_front, format="PNG")
     buf_front.seek(0)
@@ -97,23 +96,31 @@ def create_docx(pil_front, pil_back):
     pil_back.save(buf_back, format="PNG")
     buf_back.seek(0)
 
-    # Thêm ảnh Mặt trước (Kích thước chiều rộng chuẩn ~ 8.56 cm = 3.37 inches)
-    p1 = doc.add_paragraph()
-    p1.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run1 = p1.add_run()
-    run1.add_picture(buf_front, width=Inches(3.37))
+    # Sử dụng Bảng (Table) 1 hàng 2 cột không viền để đặt 2 mặt nằm ngang
+    table = doc.add_table(rows=1, cols=2)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
-    # Khoảng cách giữa 2 mặt
-    p_space = doc.add_paragraph()
-    p_space.paragraph_format.space_after = Pt(18)
+    # Kích thước chuẩn thực tế chiều rộng thẻ ~ 3.37 inches (8.56 cm)
+    cell_left = table.cell(0, 0)
+    cell_right = table.cell(0, 1)
 
-    # Thêm ảnh Mặt sau
-    p2 = doc.add_paragraph()
-    p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run2 = p2.add_run()
-    run2.add_picture(buf_back, width=Inches(3.37))
+    p_left = cell_left.paragraphs[0]
+    p_left.add_run().add_picture(buf_front, width=Inches(3.37))
 
-    # Lưu file Word vào bộ nhớ tạm
+    p_right = cell_right.paragraphs[0]
+    p_right.add_run().add_picture(buf_back, width=Inches(3.37))
+
+    # Bỏ đường viền của bảng
+    for row in table.rows:
+        for cell in row.cells:
+            tcPr = cell._tc.get_or_add_tcPr()
+            tcBorders = docx.oxml.OxmlElement("w:tcBorders")
+            for border_name in ["top", "left", "bottom", "right"]:
+                border = docx.oxml.OxmlElement(f"w:{border_name}")
+                border.set(docx.oxml.ns.qn("w:val"), "none")
+                tcBorders.append(border)
+            tcPr.append(tcBorders)
+
     doc_io = io.BytesIO()
     doc.save(doc_io)
     doc_io.seek(0)
@@ -179,11 +186,12 @@ if front_file and back_file:
     c1.image(pil_front, caption="Mặt trước (đã cắt)", use_container_width=True)
     c2.image(pil_back, caption="Mặt sau (đã cắt)", use_container_width=True)
 
-    # 1. Tạo file Ảnh PNG A4
+    # 1. Tạo file Ảnh PNG A4 (Nằm ngang hàng)
     a4_w, a4_h = 1240, 1754
     canvas = Image.new("RGB", (a4_w, a4_h), "white")
-    target_w = 800
 
+    # Kích thước mỗi mặt thẻ (Rộng ~ 530px)
+    target_w = 530
     ratio_f = target_w / pil_front.width
     pil_front_resized = pil_front.resize(
         (target_w, int(pil_front.height * ratio_f))
@@ -194,31 +202,35 @@ if front_file and back_file:
         (target_w, int(pil_back.height * ratio_b))
     )
 
-    x_pos = (a4_w - target_w) // 2
-    canvas.paste(pil_front_resized, (x_pos, 180))
-    canvas.paste(
-        pil_back_resized, (x_pos, 180 + pil_front_resized.height + 80)
-    )
+    # Tọa độ ghép song song 2 mặt nằm ngang trên A4
+    gap = 60  # Khoảng cách giữa 2 thẻ
+    y_pos = 250  # Vị trí hàng ngang từ trên xuống
+    x_front = (a4_w - (target_w * 2 + gap)) // 2
+    x_back = x_front + target_w + gap
+
+    canvas.paste(pil_front_resized, (x_front, y_pos))
+    canvas.paste(pil_back_resized, (x_back, y_pos))
 
     img_io = io.BytesIO()
     canvas.save(img_io, format="PNG")
     img_io.seek(0)
 
-    # 2. Tạo file Word (.docx)
-    docx_io = create_docx(pil_front, pil_back)
+    # 2. Tạo file Word (.docx) nằm ngang
+    docx_io = create_docx_horizontal(pil_front, pil_back)
 
     st.markdown("---")
     st.subheader("📄 Xem trước & Tải file về in")
-    st.image(canvas, width=380, caption="Trang A4 sẵn sàng để in")
+    st.image(
+        canvas, width=420, caption="Bố cục photo ngang hàng sẵn sàng để in A4"
+    )
 
-    # Hai nút tải về song song
     btn_col1, btn_col2 = st.columns(2)
 
     with btn_col1:
         st.download_button(
             label="📝 Tải file WORD (.docx)",
             data=docx_io,
-            file_name=f"{doc_type.split()[0]}_in_A4.docx",
+            file_name=f"{doc_type.split()[0]}_Photo_Ngang.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             use_container_width=True,
         )
@@ -227,7 +239,7 @@ if front_file and back_file:
         st.download_button(
             label="🖼️ Tải file ÁNH (.png)",
             data=img_io,
-            file_name=f"{doc_type.split()[0]}_in_A4.png",
+            file_name=f"{doc_type.split()[0]}_Photo_Ngang.png",
             mime="image/png",
             use_container_width=True,
         )
