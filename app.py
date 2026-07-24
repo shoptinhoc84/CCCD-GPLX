@@ -6,7 +6,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches, Pt
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image
 import streamlit as st
 
 # ---------------------------------------------------------
@@ -52,55 +52,41 @@ st.caption("Tự động cắt viền • Dàn ngang mặt trước & sau • T�
 if "uploader_key" not in st.session_state:
     st.session_state["uploader_key"] = 0
 if "swap_dict" not in st.session_state:
-    st.session_state["swap_dict"] = {}
+    st.session_state["swap_dict"] = {}  # Lưu trạng thái đảo mặt riêng cho từng bộ
 
 def clear_all_files():
     st.session_state["uploader_key"] += 1
     st.session_state["swap_dict"] = {}
 
 def toggle_swap_pair(pair_index):
+    """Đảo vị trí riêng cho duy nhất 1 bộ chỉ định."""
     current_state = st.session_state["swap_dict"].get(pair_index, False)
     st.session_state["swap_dict"][pair_index] = not current_state
 
 # ---------------------------------------------------------
-# THUẬT TOÁN TỰ ĐỘNG SỬA CHIỀU ẢNH VÀ CẮT VIỀN CHUẨN ĐIỆN THOẠI
+# THUẬT TOÁN XỬ LÝ ẢNH
 # ---------------------------------------------------------
-def optimize_and_fix_orientation(raw_img, max_dim=1600):
-    """Tự động xoay ảnh về đúng chiều chuẩn EXIF từ điện thoại & giảm kích thước."""
-    # Sửa lỗi góc xoay của ảnh chụp từ iPhone/Android
-    fixed_img = ImageOps.exif_transpose(raw_img)
-    
-    w, h = fixed_img.size
+def optimize_image_size(pil_img, max_dim=1600):
+    w, h = pil_img.size
     if max(w, h) > max_dim:
         scale = max_dim / float(max(w, h))
-        fixed_img = fixed_img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
-    return fixed_img
+        return pil_img.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
+    return pil_img
 
 def crop_card_fast(image_np):
-    """Tách viền thẻ nâng cao, tự động xoay ngang nếu ảnh chụp dọc."""
     h_img, w_img, _ = image_np.shape
-
-    # Nếu ảnh bị chụp dọc, tự động xoay 90 độ để thẻ nằm ngang
-    if h_img > w_img:
-        image_np = cv2.rotate(image_np, cv2.ROTATE_90_CLOCKWISE)
-        h_img, w_img, _ = image_np.shape
-
     gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    
-    # Kết hợp Canny và Threshold để bắt viền mạnh mẽ hơn trên nền vải/bàn
     _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
     best_rect, max_area = None, 0
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area > (w_img * h_img * 0.08):  # Giảm ngưỡng diện tích để bắt được thẻ nhỏ hơn
+        if area > (w_img * h_img * 0.10):
             x, y, w, h = cv2.boundingRect(cnt)
             aspect_ratio = float(w) / h
-            
-            # Mở rộng dải tỷ lệ khung hình (1.1 - 2.1)
-            if 1.1 <= aspect_ratio <= 2.1 and (w < w_img * 0.98):
+            if 1.2 <= aspect_ratio <= 1.95 and (w < w_img * 0.98):
                 if area > max_area:
                     max_area = area
                     best_rect = (x, y, w, h)
@@ -108,7 +94,6 @@ def crop_card_fast(image_np):
     if best_rect:
         x, y, w, h = best_rect
         return image_np[max(0, y - 4):min(h_img, y + h + 8), max(0, x - 4):min(w_img, x + w + 8)]
-    
     return image_np
 
 def add_card_row_to_word(doc, pil_front, pil_back):
@@ -228,17 +213,16 @@ if uploaded_files:
                 raw_img1 = Image.open(uploaded_files[i]).convert("RGB")
                 raw_img2 = Image.open(uploaded_files[i + 1]).convert("RGB")
 
-                # Sửa hướng ảnh EXIF & Tối ưu kích thước
-                opt_1 = optimize_and_fix_orientation(raw_img1)
-                opt_2 = optimize_and_fix_orientation(raw_img2)
+                opt_1 = optimize_image_size(raw_img1)
+                opt_2 = optimize_image_size(raw_img2)
 
-                # Tách viền
                 crop_1 = crop_card_fast(np.array(opt_1))
                 crop_2 = crop_card_fast(np.array(opt_2))
 
                 pil_f = Image.fromarray(crop_1)
                 pil_b = Image.fromarray(crop_2)
 
+                # Kiểm tra xem bộ này có bấm nút Đảo riêng hay không
                 if st.session_state["swap_dict"].get(idx, False):
                     pil_f, pil_b = pil_b, pil_f
 
@@ -280,7 +264,9 @@ if uploaded_files:
                 mime="image/png",
             )
 
+        # KHU VỰC PREVIEW & ĐẢO MẶT RIÊNG TỪNG BỘ
         with preview_area:
+            # Nút điều chỉnh đảo vị trí độc lập cho từng bộ
             st.write("🔄 **Tuỳ chỉnh vị trí cho riêng từng bộ (nếu bị ngược):**")
             btn_cols = st.columns(min(len(card_pairs), 4))
             for p_idx in range(len(card_pairs)):
