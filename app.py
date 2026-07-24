@@ -46,48 +46,26 @@ st.markdown(
 )
 
 st.markdown('<div class="main-header">🖨️ Xử Lý & Dàn Trang Giấy Tờ A4 Super Fast</div>', unsafe_allow_html=True)
-st.caption("Tự động cắt viền • Tự động sắp xếp Mặt Trước/Mặt Sau • Tối ưu 2 bộ/trang A4")
+st.caption("Tự động cắt viền • Dàn ngang mặt trước & sau • Tối ưu 2 bộ/trang A4")
 
 # Quản lý Session State
 if "uploader_key" not in st.session_state:
     st.session_state["uploader_key"] = 0
-if "swap_sides" not in st.session_state:
-    st.session_state["swap_sides"] = False
+if "swap_dict" not in st.session_state:
+    st.session_state["swap_dict"] = {}  # Lưu trạng thái đảo mặt riêng cho từng bộ
 
 def clear_all_files():
     st.session_state["uploader_key"] += 1
-    st.session_state["swap_sides"] = False
+    st.session_state["swap_dict"] = {}
 
-def toggle_swap():
-    st.session_state["swap_sides"] = not st.session_state["swap_sides"]
+def toggle_swap_pair(pair_index):
+    """Đảo vị trí riêng cho duy nhất 1 bộ chỉ định."""
+    current_state = st.session_state["swap_dict"].get(pair_index, False)
+    st.session_state["swap_dict"][pair_index] = not current_state
 
 # ---------------------------------------------------------
-# THUẬT TOÁN NHẬN BIẾT MẶT TRƯỚC / MẶT SAU & XỬ LÝ ẢNH
+# THUẬT TOÁN XỬ LÝ ẢNH
 # ---------------------------------------------------------
-def is_front_side(image_np):
-    """
-    Kiểm tra xem ảnh có phải mặt trước hay không dựa vào vị trí ảnh chân dung 
-    (Mặt trước CCCD/GPLX luôn có khu vực khuôn mặt ở phía dưới bên trái).
-    """
-    try:
-        h, w, _ = image_np.shape
-        # Cắt vùng góc dưới bên trái (nơi chứa ảnh chân dung)
-        face_crop = image_np[int(h * 0.35):int(h * 0.95), int(w * 0.05):int(w * 0.45)]
-        
-        # Dùng Haar Cascade phát hiện khuôn mặt nhanh
-        gray_crop = cv2.cvtColor(face_crop, cv2.COLOR_RGB2GRAY)
-        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-        faces = face_cascade.detectMultiScale(gray_crop, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
-        
-        if len(faces) > 0:
-            return True
-            
-        # Nếu không thấy mặt (ảnh mờ), kiểm tra vân tay (mặt sau CCCD có 2 ô vân tay màu đỏ/ xám đặc trưng)
-        # Hoặc kiểm tra độ đậm vùng mã QR/Mã vạch ở góc dưới
-        return False
-    except Exception:
-        return True
-
 def optimize_image_size(pil_img, max_dim=1600):
     w, h = pil_img.size
     if max(w, h) > max_dim:
@@ -209,7 +187,7 @@ with col_left:
     download_area = st.container()
 
 with col_right:
-    st.subheader("2. Xem Trước Bản In A4")
+    st.subheader("2. Xem Trước Bản In A4 & Tuỳ Chỉnh")
     preview_area = st.container()
 
 # ---------------------------------------------------------
@@ -230,7 +208,7 @@ if uploaded_files:
             status_text = st.empty()
 
             for idx, i in enumerate(range(0, num_pairs * 2, 2)):
-                status_text.text(f"⏳ Tự động kiểm tra & ghép Bộ {idx + 1}/{num_pairs}...")
+                status_text.text(f"⏳ Đang xử lý Bộ {idx + 1}/{num_pairs}...")
                 
                 raw_img1 = Image.open(uploaded_files[i]).convert("RGB")
                 raw_img2 = Image.open(uploaded_files[i + 1]).convert("RGB")
@@ -241,20 +219,11 @@ if uploaded_files:
                 crop_1 = crop_card_fast(np.array(opt_1))
                 crop_2 = crop_card_fast(np.array(opt_2))
 
-                # TỰ ĐỘNG PHÁT HIỆN MẶT TRƯỚC / MẶT SAU
-                img1_is_front = is_front_side(crop_1)
-                img2_is_front = is_front_side(crop_2)
+                pil_f = Image.fromarray(crop_1)
+                pil_b = Image.fromarray(crop_2)
 
-                if not img1_is_front and img2_is_front:
-                    # Đảo vị trí nếu ảnh 1 là mặt sau, ảnh 2 mới là mặt trước
-                    pil_f = Image.fromarray(crop_2)
-                    pil_b = Image.fromarray(crop_1)
-                else:
-                    pil_f = Image.fromarray(crop_1)
-                    pil_b = Image.fromarray(crop_2)
-
-                # Nếu người dùng bấm nút đảo thủ công
-                if st.session_state["swap_sides"]:
+                # Kiểm tra xem bộ này có bấm nút Đảo riêng hay không
+                if st.session_state["swap_dict"].get(idx, False):
                     pil_f, pil_b = pil_b, pil_f
 
                 card_pairs.append((pil_f, pil_b))
@@ -277,9 +246,6 @@ if uploaded_files:
         with download_area:
             st.success(f"⚡ Đã ghép xong **{len(card_pairs)} bộ**!")
 
-            # Nút Đảo Mặt Thủ Công (Nhanh 1-click)
-            st.button("🔄 Đảo Vị Trí Mặt Trước ↔ Mặt Sau", on_click=toggle_swap, use_container_width=True)
-
             st.download_button(
                 label=f"📝 TẢI FILE WORD NGAY (.docx)",
                 data=docx_io,
@@ -298,7 +264,24 @@ if uploaded_files:
                 mime="image/png",
             )
 
+        # KHU VỰC PREVIEW & ĐẢO MẶT RIÊNG TỪNG BỘ
         with preview_area:
+            # Nút điều chỉnh đảo vị trí độc lập cho từng bộ
+            st.write("🔄 **Tuỳ chỉnh vị trí cho riêng từng bộ (nếu bị ngược):**")
+            btn_cols = st.columns(min(len(card_pairs), 4))
+            for p_idx in range(len(card_pairs)):
+                is_swapped = st.session_state["swap_dict"].get(p_idx, False)
+                btn_label = f"🔄 Đảo Bộ {p_idx + 1}" + (" (Đã đảo)" if is_swapped else "")
+                btn_cols[p_idx % 4].button(
+                    btn_label, 
+                    key=f"btn_swap_{p_idx}", 
+                    on_click=toggle_swap_pair, 
+                    args=(p_idx,),
+                    use_container_width=True
+                )
+
+            st.markdown("---")
+
             if len(a4_canvases) > 1:
                 tabs = st.tabs([f"Trang #{i + 1}" for i in range(len(a4_canvases))])
                 for i, tab in enumerate(tabs):
