@@ -1,6 +1,7 @@
 import io
 import cv2
 import docx
+from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches, Pt
 import numpy as np
@@ -8,26 +9,23 @@ from PIL import Image
 import streamlit as st
 
 st.set_page_config(
-    page_title="Công cụ Photo / Ghép giấy tờ hàng loạt in A4",
+    page_title="Công cụ Photo / Ghép giấy tờ in A4",
     layout="centered",
     page_icon="🖨️",
 )
 
-st.title("🖨️ Lọc viền & Ghép nhiều giấy tờ in A4")
+st.title("🖨️ Ghép giấy tờ A4 (Ngang - 2 bộ/trang)")
 st.write(
-    "Tải lên **nhiều ảnh cùng lúc** (bao gồm mặt trước & mặt sau). "
-    "Hệ thống sẽ tự động ghép từng cặp (1-2, 3-4,...) thành các trang A4 hoàn chỉnh."
+    "Hỗ trợ tự động xếp **Mặt trước - Mặt sau nằm ngang**, tối ưu **2 bộ giấy tờ trên 1 trang A4**."
 )
 
 
 def crop_card(image_np):
-    """Cắt thẻ chuẩn xác dựa trên nhận diện viền chữ nhật và tỷ lệ khung hình chuẩn."""
+    """Cắt thẻ chuẩn xác dựa trên nhận diện viền chữ nhật."""
     h_img, w_img, _ = image_np.shape
 
     gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    # Threshold tự động (Otsu) để tách biệt thẻ và nền
     _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     contours, _ = cv2.findContours(
@@ -43,7 +41,6 @@ def crop_card(image_np):
             x, y, w, h = cv2.boundingRect(cnt)
             aspect_ratio = float(w) / h
 
-            # Tỷ lệ thẻ chuẩn (CCCD / GPLX PET) dao động từ 1.2 - 1.9
             if 1.2 <= aspect_ratio <= 1.9 and (w < w_img * 0.98):
                 if area > max_area:
                     max_area = area
@@ -51,71 +48,60 @@ def crop_card(image_np):
 
     if best_rect:
         x, y, w, h = best_rect
-        x = max(0, x - 3)
-        y = max(0, y - 3)
-        w = min(w_img - x, w + 6)
-        h = min(h_img - y, h + 6)
-        return image_np[y : y + h, x : x + w]
-
-    # Dự phòng bằng Canny Edge Detection
-    edges = cv2.Canny(blur, 30, 150)
-    contours, _ = cv2.findContours(
-        edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
-    if contours:
-        valid_cnts = [
-            c
-            for c in contours
-            if cv2.contourArea(c) < (w_img * h_img * 0.95)
-            and cv2.contourArea(c) > (w_img * h_img * 0.1)
+        return image_np[
+            max(0, y - 3) : min(h_img, y + h + 6),
+            max(0, x - 3) : min(w_img, x + w + 6),
         ]
-        if valid_cnts:
-            c = max(valid_cnts, key=cv2.contourArea)
-            x, y, w, h = cv2.boundingRect(c)
-            return image_np[y : y + h, x : x + w]
 
     return image_np
 
 
+def add_card_row_to_word(doc, pil_front, pil_back):
+    """Thêm 1 bộ (Mặt trước + Mặt sau nằm ngang) vào file Word dưới dạng Bảng 1 dòng 2 cột."""
+    table = doc.add_table(rows=1, cols=2)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+    # Chuyển ảnh sang Byte Stream
+    buf_front, buf_back = io.BytesIO(), io.BytesIO()
+    pil_front.save(buf_front, format="PNG")
+    pil_back.save(buf_back, format="PNG")
+    buf_front.seek(0)
+    buf_back.seek(0)
+
+    # Ô 1: Mặt trước
+    cell_f = table.cell(0, 0)
+    p_f = cell_f.paragraphs[0]
+    p_f.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_f.add_run().add_picture(buf_front, width=Inches(3.3))
+
+    # Ô 2: Mặt sau
+    cell_b = table.cell(0, 1)
+    p_b = cell_b.paragraphs[0]
+    p_b.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_b.add_run().add_picture(buf_back, width=Inches(3.3))
+
+    # Khoảng cách giữa các bộ
+    p_space = doc.add_paragraph()
+    p_space.paragraph_format.space_after = Pt(24)
+
+
 def create_multi_docx(card_pairs):
-    """Tạo file Word (.docx) chứa nhiều bộ giấy tờ, mỗi bộ nằm trên 1 trang A4 riêng."""
+    """Tạo file Word (.docx) chứa 2 bộ nằm trên 1 trang A4."""
     doc = docx.Document()
 
-    # Cấu hình lề trang A4
+    # Cấu hình lề A4
     for section in doc.sections:
-        section.top_margin = Inches(0.8)
-        section.bottom_margin = Inches(0.8)
-        section.left_margin = Inches(0.8)
-        section.right_margin = Inches(0.8)
+        section.top_margin = Inches(0.6)
+        section.bottom_margin = Inches(0.6)
+        section.left_margin = Inches(0.5)
+        section.right_margin = Inches(0.5)
 
     for i, (pil_front, pil_back) in enumerate(card_pairs):
-        if i > 0:
-            doc.add_page_break()  # Sang trang mới cho bộ tiếp theo
+        # Sau mỗi 2 bộ thì ngắt sang trang A4 mới
+        if i > 0 and i % 2 == 0:
+            doc.add_page_break()
 
-        # Chuyển PIL Image sang Byte Stream
-        buf_front = io.BytesIO()
-        pil_front.save(buf_front, format="PNG")
-        buf_front.seek(0)
-
-        buf_back = io.BytesIO()
-        pil_back.save(buf_back, format="PNG")
-        buf_back.seek(0)
-
-        # Mặt trước
-        p1 = doc.add_paragraph()
-        p1.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run1 = p1.add_run()
-        run1.add_picture(buf_front, width=Inches(3.37))
-
-        # Khoảng cách giữa 2 mặt
-        p_space = doc.add_paragraph()
-        p_space.paragraph_format.space_after = Pt(18)
-
-        # Mặt sau
-        p2 = doc.add_paragraph()
-        p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run2 = p2.add_run()
-        run2.add_picture(buf_back, width=Inches(3.37))
+        add_card_row_to_word(doc, pil_front, pil_back)
 
     doc_io = io.BytesIO()
     doc.save(doc_io)
@@ -123,27 +109,34 @@ def create_multi_docx(card_pairs):
     return doc_io
 
 
-def create_a4_canvas(pil_front, pil_back):
-    """Tạo ảnh A4 ghép mặt trước và mặt sau."""
-    a4_w, a4_h = 1240, 1754
+def create_a4_canvas_horizontal(card_pairs_chunk):
+    """Tạo file ảnh PNG khổ A4 chứa tối đa 2 bộ nằm ngang."""
+    a4_w, a4_h = 1240, 1754  # Khổ A4 chuẩn pixel
     canvas = Image.new("RGB", (a4_w, a4_h), "white")
-    target_w = 800
 
-    ratio_f = target_w / pil_front.width
-    pil_front_resized = pil_front.resize(
-        (target_w, int(pil_front.height * ratio_f))
-    )
+    card_w = 540  # Chiều rộng 1 mặt thẻ trên canvas
+    spacing_x = 40  # Khoảng cách giữa mặt trước và mặt sau
+    start_x = (a4_w - (card_w * 2 + spacing_x)) // 2
 
-    ratio_b = target_w / pil_back.width
-    pil_back_resized = pil_back.resize(
-        (target_w, int(pil_back.height * ratio_b))
-    )
+    y_positions = [180, 920]  # Tọa độ Y cho Bộ 1 và Bộ 2
 
-    x_pos = (a4_w - target_w) // 2
-    canvas.paste(pil_front_resized, (x_pos, 180))
-    canvas.paste(
-        pil_back_resized, (x_pos, 180 + pil_front_resized.height + 80)
-    )
+    for idx, (pil_front, pil_back) in enumerate(card_pairs_chunk):
+        if idx >= 2:
+            break
+
+        y_pos = y_positions[idx]
+
+        # Resize mặt trước
+        ratio_f = card_w / pil_front.width
+        f_resized = pil_front.resize((card_w, int(pil_front.height * ratio_f)))
+
+        # Resize mặt sau
+        ratio_b = card_w / pil_back.width
+        b_resized = pil_back.resize((card_w, int(pil_back.height * ratio_b)))
+
+        # Dán vào Canvas A4
+        canvas.paste(f_resized, (start_x, y_pos))
+        canvas.paste(b_resized, (start_x + card_w + spacing_x, y_pos))
 
     return canvas
 
@@ -156,7 +149,7 @@ doc_type = st.radio(
 )
 
 uploaded_files = st.file_uploader(
-    "📸 Chọn TẤT CẢ ảnh giấy tờ (Cho phép chọn nhiều ảnh cùng lúc):",
+    "📸 Chọn TẤT CẢ ảnh giấy tờ (Hệ thống ghép từng cặp 1-2, 3-4,...):",
     type=["jpg", "jpeg", "png"],
     accept_multiple_files=True,
 )
@@ -167,33 +160,25 @@ if uploaded_files:
     if num_files < 2:
         st.warning("⚠️ Vui lòng chọn ít nhất 2 ảnh (mặt trước và mặt sau).")
     else:
-        if num_files % 2 != 0:
-            st.info(
-                f"ℹ️ Bạn đã tải lên **{num_files}** ảnh (số lẻ). Hệ thống sẽ xử lý **{num_files - 1}** ảnh đủ cặp đầu tiên."
-            )
-
         card_pairs = []
         a4_canvases = []
 
-        with st.spinner("Đang tự động lọc viền & ghép các bộ giấy tờ..."):
-            # Lặp qua từng cặp ảnh (2 ảnh / bộ)
+        with st.spinner("Đang tự động lọc viền & xếp 2 bộ / trang A4..."):
             for i in range(0, num_files - (num_files % 2), 2):
-                file_front = uploaded_files[i]
-                file_back = uploaded_files[i + 1]
-
-                img_front_raw = Image.open(file_front).convert("RGB")
-                img_back_raw = Image.open(file_back).convert("RGB")
+                img_front_raw = Image.open(uploaded_files[i]).convert("RGB")
+                img_back_raw = Image.open(uploaded_files[i + 1]).convert("RGB")
 
                 cropped_front = crop_card(np.array(img_front_raw))
                 cropped_back = crop_card(np.array(img_back_raw))
 
-                pil_front = Image.fromarray(cropped_front)
-                pil_back = Image.fromarray(cropped_back)
+                card_pairs.append(
+                    (Image.fromarray(cropped_front), Image.fromarray(cropped_back))
+                )
 
-                card_pairs.append((pil_front, pil_back))
-
-                # Tạo trang A4 tương ứng
-                canvas = create_a4_canvas(pil_front, pil_back)
+            # Ghép ảnh A4 (Mỗi trang chứa tối đa 2 bộ)
+            for i in range(0, len(card_pairs), 2):
+                chunk = card_pairs[i : i + 2]
+                canvas = create_a4_canvas_horizontal(chunk)
                 a4_canvases.append(canvas)
 
         st.success(
@@ -201,37 +186,32 @@ if uploaded_files:
         )
 
         st.markdown("---")
-        st.subheader("📄 Xem trước kết quả")
+        st.subheader("📄 Xem trước mẫu A4 (Ngang 2 bộ)")
 
-        # Hiển thị xem trước danh sách các trang A4
         cols = st.columns(min(len(a4_canvases), 3))
         for idx, canvas in enumerate(a4_canvases):
-            col_idx = idx % 3
-            cols[col_idx].image(
-                canvas,
-                caption=f"Bộ {idx + 1} (A4)",
-                use_container_width=True,
+            cols[idx % 3].image(
+                canvas, caption=f"Trang A4 thứ {idx + 1}", use_container_width=True
             )
 
-        # Xuất file Word chung cho tất cả các trang
+        # Xuất file Word
         docx_io = create_multi_docx(card_pairs)
 
         st.markdown("---")
-        st.subheader("📥 Tải về tập tin đã ghép")
+        st.subheader("📥 Tải về tập tin")
 
         btn_col1, btn_col2 = st.columns(2)
 
         with btn_col1:
             st.download_button(
-                label=f"📝 Tải WORD chứa {len(card_pairs)} bộ (.docx)",
+                label=f"📝 Tải WORD ({len(card_pairs)} bộ - Nằm ngang) (.docx)",
                 data=docx_io,
-                file_name=f"{doc_type.split()[0]}_HangLoat.docx",
+                file_name=f"{doc_type.split()[0]}_A4_Ngang.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 use_container_width=True,
             )
 
         with btn_col2:
-            # Tải ảnh trang A4 đầu tiên (hoặc bộ đầu tiên)
             img_io = io.BytesIO()
             a4_canvases[0].save(img_io, format="PNG")
             img_io.seek(0)
