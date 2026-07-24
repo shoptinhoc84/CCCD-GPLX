@@ -29,7 +29,7 @@ st.markdown(
     }
     .stDownloadButton button {
         width: 100%;
-        background-color: #16A34A !important; /* Màu xanh lá nổi bật */
+        background-color: #16A34A !important;
         color: white !important;
         font-weight: bold !important;
         font-size: 1.05rem !important;
@@ -40,6 +40,10 @@ st.markdown(
     .stDownloadButton button:hover {
         background-color: #15803D !important;
     }
+    /* Style nút Làm mới */
+    div[data-testid="stButton"] button {
+        border-radius: 8px !important;
+    }
     </style>
 """,
     unsafe_allow_html=True,
@@ -48,8 +52,16 @@ st.markdown(
 st.markdown('<div class="main-header">🖨️ Xử Lý & Dàn Trang Giấy Tờ A4 Super Fast</div>', unsafe_allow_html=True)
 st.caption("Tự động cắt viền • Dàn ngang mặt trước & sau • Tối ưu 2 bộ/trang A4")
 
+# Quản lý Session State để xóa danh sách file cũ
+if "uploader_key" not in st.session_state:
+    st.session_state["uploader_key"] = 0
+
+def clear_all_files():
+    """Hàm làm mới: Tăng key để reset ô uploader xóa sạch ảnh cũ."""
+    st.session_state["uploader_key"] += 1
+
 # ---------------------------------------------------------
-# THUẬT TOÁN XỬ LÝ ẢNH NHẸ & NHANH
+# THUẬT TOÁN XỬ LÝ ẢNH
 # ---------------------------------------------------------
 def optimize_image_size(pil_img, max_dim=1600):
     w, h = pil_img.size
@@ -155,13 +167,22 @@ with col_left:
         horizontal=True
     )
 
+    # Nút bấm làm mới đặt cạnh tiêu đề upload
+    col_up_title, col_btn_clear = st.columns([0.65, 0.35])
+    with col_up_title:
+        st.write("📥 Tải lên tất cả ảnh:")
+    with col_btn_clear:
+        st.button("🧹 Làm mới (Xóa hết)", on_click=clear_all_files, use_container_width=True, type="secondary")
+
     uploaded_files = st.file_uploader(
-        "📥 Tải lên tất cả ảnh (Mặt trước + Mặt sau):",
+        "Tải lên tất cả ảnh (Mặt trước + Mặt sau):",
         type=["jpg", "jpeg", "png"],
         accept_multiple_files=True,
+        key=f"file_uploader_{st.session_state['uploader_key']}", # Key linh hoạt
+        label_visibility="collapsed"
     )
 
-    # Khu vực chứa Nút Tải File được ưu tiên đẩy lên HÀNG ĐẦU
+    # Khu vực chứa Nút Tải File
     download_area = st.container()
 
 with col_right:
@@ -220,7 +241,7 @@ if uploaded_files:
         # Tạo File Word
         docx_io = create_multi_docx(card_pairs)
 
-        # 🎯 ĐƯA NÚT TẢI LÊN NGAY BÊN DƯỚI Ô UPLOAD (KHÔNG CẦN KÉO CHUỘT)
+        # Hiển thị nút tải file
         with download_area:
             st.success(f"⚡ Đã ghép xong **{len(card_pairs)} bộ**!")
             
@@ -242,7 +263,7 @@ if uploaded_files:
                 mime="image/png",
             )
 
-        # ĐƯA HÌNH XEM TRƯỚC SANG CỘT PHẢI
+        # Hiển thị hình xem trước
         with preview_area:
             if len(a4_canvases) > 1:
                 tabs = st.tabs([f"Trang #{i + 1}" for i in range(len(a4_canvases))])
