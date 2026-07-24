@@ -5,19 +5,8 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches, Pt
 import numpy as np
 from PIL import Image
+import pytesseract
 import streamlit as st
-
-# Tải EasyOCR (dùng cache để không bị tải lại model khi rerun app)
-try:
-    import easyocr
-
-    @st.cache_resource
-    def load_ocr():
-        return easyocr.Reader(["vi", "en"], gpu=False)
-
-    reader = load_ocr()
-except Exception as e:
-    reader = None
 
 st.set_page_config(
     page_title="Hệ thống phân loại & Ghép giấy tờ A4 hàng loạt",
@@ -27,15 +16,9 @@ st.set_page_config(
 
 st.title("🖨️ Phân loại Smart & Ghép giấy tờ in A4")
 st.write(
-    "Tải lên **tất cả ảnh** (CCCD, GPLX, mặt trước, mặt sau lẫn lộn) vào 1 ô duy nhất. "
+    "Tải lên **tất cả ảnh** (CCCD, GPLX, mặt trước, mặt sau). "
     "Hệ thống sẽ tự nhận diện loại giấy tờ, tự lọc viền và xếp theo đúng cặp!"
 )
-
-if reader is None:
-    st.error(
-        "⚠️ Chưa thể khởi tạo thư viện `easyocr`. "
-        "Vui lòng đảm bảo đã thêm `easyocr` vào `requirements.txt` và `libgl1`, `libglib2.0-0` vào `packages.txt`."
-    )
 
 
 def crop_card(image_np):
@@ -44,8 +27,6 @@ def crop_card(image_np):
 
     gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    # Threshold tự động (Otsu) để tách biệt thẻ và nền
     _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     contours, _ = cv2.findContours(
@@ -60,8 +41,6 @@ def crop_card(image_np):
         if area > (w_img * h_img * 0.12):
             x, y, w, h = cv2.boundingRect(cnt)
             aspect_ratio = float(w) / h
-
-            # Tỷ lệ thẻ chuẩn (CCCD / GPLX PET) dao động từ 1.2 - 1.9
             if 1.2 <= aspect_ratio <= 1.9 and (w < w_img * 0.98):
                 if area > max_area:
                     max_area = area
@@ -69,90 +48,104 @@ def crop_card(image_np):
 
     if best_rect:
         x, y, w, h = best_rect
-        x = max(0, x - 3)
-        y = max(0, y - 3)
-        w = min(w_img - x, w + 6)
-        h = min(h_img - y, h + 6)
-        return image_np[y : y + h, x : x + w]
-
-    # Dự phòng bằng Canny Edge Detection
-    edges = cv2.Canny(blur, 30, 150)
-    contours, _ = cv2.findContours(
-        edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
-    if contours:
-        valid_cnts = [
-            c
-            for c in contours
-            if cv2.contourArea(c) < (w_img * h_img * 0.95)
-            and cv2.contourArea(c) > (w_img * h_img * 0.1)
+        return image_np[
+            max(0, y - 3) : min(h_img, y + h + 6),
+            max(0, x - 3) : min(w_img, x + w + 6),
         ]
-        if valid_cnts:
-            c = max(valid_cnts, key=cv2.contourArea)
-            x, y, w, h = cv2.boundingRect(c)
-            return image_np[y : y + h, x : x + w]
 
     return image_np
 
 
+def preprocess_for_ocr(image_np):
+    """Tăng cường độ tương phản giúp Tesseract đọc nét chữ GPLX và CCCD tốt hơn."""
+    gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
+    # Tăng độ tương phản
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    return enhanced
+
+
 def classify_and_detect_side(image_np):
-    """Tự động nhận dạng:
+    """Đọc OCR bằng PyTesseract và phân loại giấy tờ."""
+    processed_img = preprocess_for_ocr(image_np)
 
-    - Loại giấy tờ: 'CCCD' hoặc 'GPLX'
-    - Mặt: 'front' hoặc 'back'
-    """
-    if reader is None:
-        return "CCCD", "front"
+    # Đọc văn bản tiếng Việt & tiếng Anh
+    try:
+        text = pytesseract.image_to_string(
+            processed_img, lang="vie+eng", config="--psm 6"
+        )
+    except Exception:
+        text = pytesseract.image_to_string(processed_img, config="--psm 6")
 
-    # Đọc text trong ảnh bằng EasyOCR
-    results = reader.readtext(image_np, detail=0)
-    text_combined = " ".join(results).lower()
+    text_clean = text.lower()
 
-    # Logic nhận diện Loại giấy tờ
+    # --- LOGIC NHẬN DIỆN GPLX & CCCD ---
     doc_type = "CCCD"
+
+    # GPLX thường chứa các từ khóa đặc trưng này (kể cả khi đọc thiếu dấu)
     gplx_keywords = [
-        "bằng lái",
-        "giấy phép lái xe",
-        "driving licence",
+        "driving",
+        "licence",
+        "license",
+        "lai xe",
+        "lái xe",
         "gplx",
-        "phép lái xe",
+        "hang",
+        "phép",
+        "phep",
+        "class",
     ]
-    if any(k in text_combined for k in gplx_keywords):
+    if any(k in text_clean for k in gplx_keywords):
         doc_type = "GPLX"
     elif any(
-        k in text_combined
-        for k in ["căn cước", "mã số", "chứng minh", "identity card"]
+        k in text_clean
+        for k in ["can cuoc", "căn cước", "citizen", "identity", "chứng minh"]
     ):
         doc_type = "CCCD"
 
-    # Logic nhận diện Mặt trước / Mặt sau
+    # --- LOGIC NHẬN DIỆN MẶT TRƯỚC / MẶT SAU ---
     side = "front"
+
     back_keywords = [
-        "đặc điểm nhân dạng",
-        "ngày, tháng, năm cấp",
-        "có giá trị đến",
-        "thâm quyến",
+        "nhan dang",
+        "nhân dạng",
+        "ngay cap",
+        "ngày cấp",
+        "gia tri den",
+        "giá trị đến",
+        "cuc truong",
         "cục trưởng",
-        "ký, ghi rõ",
+        "co gia tri",
+        "có giá trị",
+        "ky",
+        "ký",
     ]
     front_keywords = [
-        "họ và tên",
+        "ho ten",
+        "họ tên",
+        "ngay sinh",
         "ngày sinh",
+        "gioi tinh",
         "giới tính",
+        "quoc tich",
         "quốc tịch",
-        "date of birth",
+        "full name",
+        "dob",
     ]
 
-    if any(k in text_combined for k in back_keywords):
+    back_score = sum(1 for k in back_keywords if k in text_clean)
+    front_score = sum(1 for k in front_keywords if k in text_clean)
+
+    if back_score > front_score:
         side = "back"
-    elif any(k in text_combined for k in front_keywords):
+    else:
         side = "front"
 
     return doc_type, side
 
 
 def create_multi_docx(grouped_pairs):
-    """Tạo file Word (.docx) gom tất cả CCCD & GPLX đã phân loại."""
+    """Tạo file Word (.docx) chứa tất cả giấy tờ."""
     doc = docx.Document()
     for section in doc.sections:
         section.top_margin = Inches(0.8)
@@ -174,21 +167,19 @@ def create_multi_docx(grouped_pairs):
             r_title.bold = True
             r_title.font.size = Pt(14)
 
-            # Đưa ảnh vào BytesIO
+            # Ảnh BytesIO
             buf_f, buf_b = io.BytesIO(), io.BytesIO()
             pil_front.save(buf_f, format="PNG")
             pil_back.save(buf_b, format="PNG")
             buf_f.seek(0)
             buf_b.seek(0)
 
-            # Mặt trước
             p1 = doc.add_paragraph()
             p1.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p1.add_run().add_picture(buf_f, width=Inches(3.37))
 
             doc.add_paragraph().paragraph_format.space_after = Pt(12)
 
-            # Mặt sau
             p2 = doc.add_paragraph()
             p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p2.add_run().add_picture(buf_b, width=Inches(3.37))
@@ -211,7 +202,7 @@ if uploaded_files:
         st.warning("⚠️ Vui lòng chọn ít nhất 2 ảnh để thực hiện ghép cặp.")
     else:
         with st.spinner(
-            "🤖 Đang quét OCR, tự động phân loại giấy tờ và ghép mặt trước/sau..."
+            "🤖 Đang quét OCR nhẹ, tự động phân loại và ghép mặt..."
         ):
             processed_data = []
 
@@ -233,7 +224,7 @@ if uploaded_files:
                     "side": side,
                 })
 
-        # Gom nhóm dữ liệu theo Loại giấy tờ
+        # Gom nhóm dữ liệu
         grouped_docs = {}
         for item in processed_data:
             dt = item["type"]
@@ -245,7 +236,7 @@ if uploaded_files:
             else:
                 grouped_docs[dt]["backs"].append(item["image"])
 
-        # Tự động ghép cặp (Mặt trước + Mặt sau)
+        # Ghép cặp
         final_pairs = {}
         total_pairs = 0
 
@@ -253,7 +244,6 @@ if uploaded_files:
             pairs = []
             f_list, b_list = data["fronts"], data["backs"]
 
-            # Lần lượt ghép front[i] với back[i]
             min_len = min(len(f_list), len(b_list))
             for i in range(min_len):
                 pairs.append((f_list[i], b_list[i]))
@@ -267,7 +257,6 @@ if uploaded_files:
                 f"🎉 Đã tự động phân loại và ghép thành công **{total_pairs} bộ giấy tờ**!"
             )
 
-            # Hiển thị kết quả xem trước
             for dt, pairs in final_pairs.items():
                 st.markdown(f"### 📋 Loại: **{dt}** ({len(pairs)} bộ)")
                 cols = st.columns(min(len(pairs), 3))
@@ -281,7 +270,6 @@ if uploaded_files:
                             b, caption="Mặt sau", use_container_width=True
                         )
 
-            # Tạo nút tải file Word
             docx_file = create_multi_docx(final_pairs)
             st.markdown("---")
             st.download_button(
@@ -293,5 +281,5 @@ if uploaded_files:
             )
         else:
             st.warning(
-                "⚠️ Chưa ghép được bộ hoàn chỉnh nào. Vui lòng đảm bảo bạn có đủ cả mặt trước và mặt sau."
+                "⚠️ Chưa ghép được bộ hoàn chỉnh nào. Vui lòng kiểm tra lại ảnh đầu vào."
             )
