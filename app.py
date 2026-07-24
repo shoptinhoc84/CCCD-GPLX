@@ -40,29 +40,54 @@ st.markdown(
     .stDownloadButton button:hover {
         background-color: #15803D !important;
     }
-    /* Style nút Làm mới */
-    div[data-testid="stButton"] button {
-        border-radius: 8px !important;
-    }
     </style>
 """,
     unsafe_allow_html=True,
 )
 
 st.markdown('<div class="main-header">🖨️ Xử Lý & Dàn Trang Giấy Tờ A4 Super Fast</div>', unsafe_allow_html=True)
-st.caption("Tự động cắt viền • Dàn ngang mặt trước & sau • Tối ưu 2 bộ/trang A4")
+st.caption("Tự động cắt viền • Tự động sắp xếp Mặt Trước/Mặt Sau • Tối ưu 2 bộ/trang A4")
 
-# Quản lý Session State để xóa danh sách file cũ
+# Quản lý Session State
 if "uploader_key" not in st.session_state:
     st.session_state["uploader_key"] = 0
+if "swap_sides" not in st.session_state:
+    st.session_state["swap_sides"] = False
 
 def clear_all_files():
-    """Hàm làm mới: Tăng key để reset ô uploader xóa sạch ảnh cũ."""
     st.session_state["uploader_key"] += 1
+    st.session_state["swap_sides"] = False
+
+def toggle_swap():
+    st.session_state["swap_sides"] = not st.session_state["swap_sides"]
 
 # ---------------------------------------------------------
-# THUẬT TOÁN XỬ LÝ ẢNH
+# THUẬT TOÁN NHẬN BIẾT MẶT TRƯỚC / MẶT SAU & XỬ LÝ ẢNH
 # ---------------------------------------------------------
+def is_front_side(image_np):
+    """
+    Kiểm tra xem ảnh có phải mặt trước hay không dựa vào vị trí ảnh chân dung 
+    (Mặt trước CCCD/GPLX luôn có khu vực khuôn mặt ở phía dưới bên trái).
+    """
+    try:
+        h, w, _ = image_np.shape
+        # Cắt vùng góc dưới bên trái (nơi chứa ảnh chân dung)
+        face_crop = image_np[int(h * 0.35):int(h * 0.95), int(w * 0.05):int(w * 0.45)]
+        
+        # Dùng Haar Cascade phát hiện khuôn mặt nhanh
+        gray_crop = cv2.cvtColor(face_crop, cv2.COLOR_RGB2GRAY)
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        faces = face_cascade.detectMultiScale(gray_crop, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30))
+        
+        if len(faces) > 0:
+            return True
+            
+        # Nếu không thấy mặt (ảnh mờ), kiểm tra vân tay (mặt sau CCCD có 2 ô vân tay màu đỏ/ xám đặc trưng)
+        # Hoặc kiểm tra độ đậm vùng mã QR/Mã vạch ở góc dưới
+        return False
+    except Exception:
+        return True
+
 def optimize_image_size(pil_img, max_dim=1600):
     w, h = pil_img.size
     if max(w, h) > max_dim:
@@ -154,7 +179,7 @@ def create_a4_canvas_horizontal(card_pairs_chunk):
     return canvas
 
 # ---------------------------------------------------------
-# BỐ CỤC CHÍNH (2 CỘT TỐI ƯU THAO TÁC)
+# BỐ CỤC CHÍNH
 # ---------------------------------------------------------
 col_left, col_right = st.columns([1, 1], gap="medium")
 
@@ -167,22 +192,20 @@ with col_left:
         horizontal=True
     )
 
-    # Nút bấm làm mới đặt cạnh tiêu đề upload
     col_up_title, col_btn_clear = st.columns([0.65, 0.35])
     with col_up_title:
         st.write("📥 Tải lên tất cả ảnh:")
     with col_btn_clear:
-        st.button("🧹 Làm mới (Xóa hết)", on_click=clear_all_files, use_container_width=True, type="secondary")
+        st.button("🧹 Làm mới", on_click=clear_all_files, use_container_width=True)
 
     uploaded_files = st.file_uploader(
-        "Tải lên tất cả ảnh (Mặt trước + Mặt sau):",
+        "Tải lên tất cả ảnh:",
         type=["jpg", "jpeg", "png"],
         accept_multiple_files=True,
-        key=f"file_uploader_{st.session_state['uploader_key']}", # Key linh hoạt
+        key=f"file_uploader_{st.session_state['uploader_key']}",
         label_visibility="collapsed"
     )
 
-    # Khu vực chứa Nút Tải File
     download_area = st.container()
 
 with col_right:
@@ -202,29 +225,41 @@ if uploaded_files:
         card_pairs = []
         a4_canvases = []
 
-        # Xử lý ảnh
         with col_left:
             progress_bar = st.progress(0)
             status_text = st.empty()
 
             for idx, i in enumerate(range(0, num_pairs * 2, 2)):
-                status_text.text(f"⏳ Processing Bộ {idx + 1}/{num_pairs}...")
+                status_text.text(f"⏳ Tự động kiểm tra & ghép Bộ {idx + 1}/{num_pairs}...")
                 
-                raw_f = Image.open(uploaded_files[i]).convert("RGB")
-                raw_b = Image.open(uploaded_files[i + 1]).convert("RGB")
+                raw_img1 = Image.open(uploaded_files[i]).convert("RGB")
+                raw_img2 = Image.open(uploaded_files[i + 1]).convert("RGB")
 
-                opt_f = optimize_image_size(raw_f)
-                opt_b = optimize_image_size(raw_b)
+                opt_1 = optimize_image_size(raw_img1)
+                opt_2 = optimize_image_size(raw_img2)
 
-                crop_f = crop_card_fast(np.array(opt_f))
-                crop_b = crop_card_fast(np.array(opt_b))
+                crop_1 = crop_card_fast(np.array(opt_1))
+                crop_2 = crop_card_fast(np.array(opt_2))
 
-                pil_f = Image.fromarray(crop_f)
-                pil_b = Image.fromarray(crop_b)
+                # TỰ ĐỘNG PHÁT HIỆN MẶT TRƯỚC / MẶT SAU
+                img1_is_front = is_front_side(crop_1)
+                img2_is_front = is_front_side(crop_2)
+
+                if not img1_is_front and img2_is_front:
+                    # Đảo vị trí nếu ảnh 1 là mặt sau, ảnh 2 mới là mặt trước
+                    pil_f = Image.fromarray(crop_2)
+                    pil_b = Image.fromarray(crop_1)
+                else:
+                    pil_f = Image.fromarray(crop_1)
+                    pil_b = Image.fromarray(crop_2)
+
+                # Nếu người dùng bấm nút đảo thủ công
+                if st.session_state["swap_sides"]:
+                    pil_f, pil_b = pil_b, pil_f
 
                 card_pairs.append((pil_f, pil_b))
 
-                del raw_f, raw_b, opt_f, opt_b, crop_f, crop_b
+                del raw_img1, raw_img2, opt_1, opt_2, crop_1, crop_2
                 gc.collect()
 
                 progress_bar.progress((idx + 1) / num_pairs)
@@ -232,19 +267,19 @@ if uploaded_files:
             status_text.empty()
             progress_bar.empty()
 
-        # Tạo Canvas A4
         for i in range(0, len(card_pairs), 2):
             chunk = card_pairs[i:i + 2]
             canvas = create_a4_canvas_horizontal(chunk)
             a4_canvases.append(canvas)
 
-        # Tạo File Word
         docx_io = create_multi_docx(card_pairs)
 
-        # Hiển thị nút tải file
         with download_area:
             st.success(f"⚡ Đã ghép xong **{len(card_pairs)} bộ**!")
-            
+
+            # Nút Đảo Mặt Thủ Công (Nhanh 1-click)
+            st.button("🔄 Đảo Vị Trí Mặt Trước ↔ Mặt Sau", on_click=toggle_swap, use_container_width=True)
+
             st.download_button(
                 label=f"📝 TẢI FILE WORD NGAY (.docx)",
                 data=docx_io,
@@ -263,7 +298,6 @@ if uploaded_files:
                 mime="image/png",
             )
 
-        # Hiển thị hình xem trước
         with preview_area:
             if len(a4_canvases) > 1:
                 tabs = st.tabs([f"Trang #{i + 1}" for i in range(len(a4_canvases))])
