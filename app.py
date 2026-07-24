@@ -7,32 +7,39 @@ import numpy as np
 from PIL import Image
 import streamlit as st
 
+# Thử import easyocr, nếu chưa cài sẽ báo hướng dẫn
+try:
+    import easyocr
+    # Khởi tạo reader (cached để không bị load lại nhiều lần)
+    @st.cache_resource
+    def load_ocr():
+        return easyocr.Reader(['vi', 'en'], gpu=False)
+    reader = load_ocr()
+except ImportError:
+    reader = None
+
 st.set_page_config(
-    page_title="Công cụ Photo / Ghép giấy tờ hàng loạt in A4",
-    layout="centered",
+    page_title="Hệ thống tự động phân loại & Ghép giấy tờ A4",
+    layout="wide",
     page_icon="🖨️",
 )
 
-st.title("🖨️ Lọc viền & Ghép nhiều giấy tờ in A4")
+st.title("🖨️ Phân loại Smart & Ghép giấy tờ in A4")
 st.write(
-    "Tải lên **nhiều ảnh cùng lúc** (bao gồm mặt trước & mặt sau). "
-    "Hệ thống sẽ tự động ghép từng cặp (1-2, 3-4,...) thành các trang A4 hoàn chỉnh."
+    "Thả **tất cả ảnh** (CCCD, GPLX, mặt trước, mặt sau lẫn lộn) vào 1 ô duy nhất. "
+    "Hệ thống sẽ tự nhận diện loại giấy tờ, tự lọc viền và xếp theo đúng cặp!"
 )
 
+if reader is None:
+    st.error("⚠️ Vui lòng cài đặt thư viện `easyocr` bằng lệnh: `pip install easyocr` để sử dụng tính năng tự nhận dạng.")
 
 def crop_card(image_np):
-    """Cắt thẻ chuẩn xác dựa trên nhận diện viền chữ nhật và tỷ lệ khung hình chuẩn."""
+    """Tách nền và cắt viền giấy tờ."""
     h_img, w_img, _ = image_np.shape
-
     gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    # Threshold tự động (Otsu) để tách biệt thẻ và nền
     _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    contours, _ = cv2.findContours(
-        thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
-    )
+    contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
     best_rect = None
     max_area = 0
@@ -42,8 +49,6 @@ def crop_card(image_np):
         if area > (w_img * h_img * 0.12):
             x, y, w, h = cv2.boundingRect(cnt)
             aspect_ratio = float(w) / h
-
-            # Tỷ lệ thẻ chuẩn (CCCD / GPLX PET) dao động từ 1.2 - 1.9
             if 1.2 <= aspect_ratio <= 1.9 and (w < w_img * 0.98):
                 if area > max_area:
                     max_area = area
@@ -51,71 +56,80 @@ def crop_card(image_np):
 
     if best_rect:
         x, y, w, h = best_rect
-        x = max(0, x - 3)
-        y = max(0, y - 3)
-        w = min(w_img - x, w + 6)
-        h = min(h_img - y, h + 6)
-        return image_np[y : y + h, x : x + w]
-
-    # Dự phòng bằng Canny Edge Detection
-    edges = cv2.Canny(blur, 30, 150)
-    contours, _ = cv2.findContours(
-        edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
-    if contours:
-        valid_cnts = [
-            c
-            for c in contours
-            if cv2.contourArea(c) < (w_img * h_img * 0.95)
-            and cv2.contourArea(c) > (w_img * h_img * 0.1)
-        ]
-        if valid_cnts:
-            c = max(valid_cnts, key=cv2.contourArea)
-            x, y, w, h = cv2.boundingRect(c)
-            return image_np[y : y + h, x : x + w]
+        return image_np[max(0, y-3):min(h_img, y+h+6), max(0, x-3):min(w_img, x+w+6)]
 
     return image_np
 
+def classify_and_detect_side(image_np):
+    """
+    Tự động nhận dạng:
+    - Loại giấy tờ: 'CCCD' hoặc 'GPLX'
+    - Mặt: 'front' hoặc 'back'
+    """
+    if reader is None:
+        return "UNKNOWN", "front"
 
-def create_multi_docx(card_pairs):
-    """Tạo file Word (.docx) chứa nhiều bộ giấy tờ, mỗi bộ nằm trên 1 trang A4 riêng."""
+    # Đọc text trong ảnh bằng EasyOCR
+    results = reader.readtext(image_np, detail=0)
+    text_combined = " ".join(results).lower()
+
+    # Logic nhận diện Loại giấy tờ
+    doc_type = "CCCD"
+    if "bằng lái" in text_text or "giấy phép lái xe" in text_combined or "driving licence" in text_combined or "gplx" in text_combined:
+        doc_type = "GPLX"
+    elif "căn cước" in text_combined or "mã số" in text_combined or "chứng minh" in text_combined or "identity card" in text_combined:
+        doc_type = "CCCD"
+
+    # Logic nhận diện Mặt trước / Mặt sau
+    side = "front"
+    # Dấu hiệu mặt sau: Có thông tin đặc điểm nhân dạng, ngày cấp, ngón trỏ, hoặc dấu vân tay / mã QR lớn
+    if any(k in text_text for k in ["đặc điểm nhân dạng", "ngày, tháng, năm cấp", "có giá trị đến", "thâm quyến", "cục trưởng"]):
+        side = "back"
+    elif any(k in text_text for k in ["họ và tên", "ngày sinh", "giới tính", "quốc tịch", "date of birth"]):
+        side = "front"
+
+    return doc_type, side
+
+def create_multi_docx(grouped_pairs):
+    """Tạo file Word (.docx) gom tất cả CCCD & GPLX đã phân loại."""
     doc = docx.Document()
-
-    # Cấu hình lề trang A4
     for section in doc.sections:
         section.top_margin = Inches(0.8)
         section.bottom_margin = Inches(0.8)
         section.left_margin = Inches(0.8)
         section.right_margin = Inches(0.8)
 
-    for i, (pil_front, pil_back) in enumerate(card_pairs):
-        if i > 0:
-            doc.add_page_break()  # Sang trang mới cho bộ tiếp theo
+    first_page = True
+    for doc_type, pairs in grouped_pairs.items():
+        for pil_front, pil_back in pairs:
+            if not first_page:
+                doc.add_page_break()
+            first_page = False
 
-        # Chuyển PIL Image sang Byte Stream
-        buf_front = io.BytesIO()
-        pil_front.save(buf_front, format="PNG")
-        buf_front.seek(0)
+            # Tiêu đề nhóm
+            p_title = doc.add_paragraph()
+            p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r_title = p_title.add_run(f"GIẤY TỜ: {doc_type.upper()}")
+            r_title.bold = True
+            r_title.font.size = Pt(14)
 
-        buf_back = io.BytesIO()
-        pil_back.save(buf_back, format="PNG")
-        buf_back.seek(0)
+            # Đưa ảnh vào BytesIO
+            buf_f, buf_b = io.BytesIO(), io.BytesIO()
+            pil_front.save(buf_f, format="PNG")
+            pil_back.save(buf_b, format="PNG")
+            buf_f.seek(0); buf_b.seek(0)
 
-        # Mặt trước
-        p1 = doc.add_paragraph()
-        p1.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run1 = p1.add_run()
-        run1.add_picture(buf_front, width=Inches(3.37))
+            # Mặt trước
+            p1 = doc.add_paragraph()
+            p1.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p1.add_run().add_picture(buf_f, width=Inches(3.37))
 
-        # Khoảng cách giữa 2 mặt
-        p_space = doc.add_paragraph()
-        p_space.paragraph_format.space_after = Pt(18)
+            doc.add_paragraph().paragraph_format.space_after = Pt(12)
 
-        # Mặt sau
-        p2 = doc.add_paragraph()
-        p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run2 = p2.add_run()
-        run2.add_picture(buf_back, width=Inches(3.37))
+            # Mặt sau
+            p2 = doc.add_paragraph()
+            p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p2.add_run().add_picture(buf_b, width=Inches(3.37))
 
     doc_io = io.BytesIO()
     doc.save(doc_io)
@@ -123,123 +137,88 @@ def create_multi_docx(card_pairs):
     return doc_io
 
 
-def create_a4_canvas(pil_front, pil_back):
-    """Tạo ảnh A4 ghép mặt trước và mặt sau."""
-    a4_w, a4_h = 1240, 1754
-    canvas = Image.new("RGB", (a4_w, a4_h), "white")
-    target_w = 800
-
-    ratio_f = target_w / pil_front.width
-    pil_front_resized = pil_front.resize(
-        (target_w, int(pil_front.height * ratio_f))
-    )
-
-    ratio_b = target_w / pil_back.width
-    pil_back_resized = pil_back.resize(
-        (target_w, int(pil_back.height * ratio_b))
-    )
-
-    x_pos = (a4_w - target_w) // 2
-    canvas.paste(pil_front_resized, (x_pos, 180))
-    canvas.paste(
-        pil_back_resized, (x_pos, 180 + pil_front_resized.height + 80)
-    )
-
-    return canvas
-
-
-# Giao diện ứng dụng
-doc_type = st.radio(
-    "📋 Chọn loại giấy tờ cần xử lý:",
-    ["Căn cước công dân (CCCD)", "Giấy phép lái xe (GPLX)"],
-    horizontal=True,
-)
-
+# --- GIAO DIỆN CHÍNH ---
 uploaded_files = st.file_uploader(
-    "📸 Chọn TẤT CẢ ảnh giấy tờ (Cho phép chọn nhiều ảnh cùng lúc):",
+    "📥 Tải lên TẤT CẢ ảnh giấy tờ (CCCD + GPLX lẫn lộn):",
     type=["jpg", "jpeg", "png"],
     accept_multiple_files=True,
 )
 
 if uploaded_files:
-    num_files = len(uploaded_files)
-
-    if num_files < 2:
-        st.warning("⚠️ Vui lòng chọn ít nhất 2 ảnh (mặt trước và mặt sau).")
+    if len(uploaded_files) < 2:
+        st.warning("⚠️ Vui lòng chọn ít nhất 2 ảnh để ghép.")
     else:
-        if num_files % 2 != 0:
-            st.info(
-                f"ℹ️ Bạn đã tải lên **{num_files}** ảnh (số lẻ). Hệ thống sẽ xử lý **{num_files - 1}** ảnh đủ cặp đầu tiên."
-            )
+        with st.spinner("🤖 Đang quét OCR, tự động nhận dạng loại giấy tờ và ghép mặt trước/sau..."):
+            processed_data = []
 
-        card_pairs = []
-        a4_canvases = []
+            for file in uploaded_files:
+                img_raw = Image.open(file).convert("RGB")
+                np_img = np.array(img_raw)
+                
+                # Cắt viền
+                cropped_np = crop_card(np_img)
+                cropped_pil = Image.fromarray(cropped_np)
+                
+                # Nhận dạng OCR
+                doc_type, side = classify_and_detect_side(cropped_np)
+                
+                processed_data.append({
+                    'file_name': file.name,
+                    'image': cropped_pil,
+                    'type': doc_type,
+                    'side': side
+                })
 
-        with st.spinner("Đang tự động lọc viền & ghép các bộ giấy tờ..."):
-            # Lặp qua từng cặp ảnh (2 ảnh / bộ)
-            for i in range(0, num_files - (num_files % 2), 2):
-                file_front = uploaded_files[i]
-                file_back = uploaded_files[i + 1]
+        # Phân loại thành các nhóm
+        grouped_docs = {}
+        # Tách danh sách theo loại giấy tờ
+        for item in processed_data:
+            dt = item['type']
+            if dt not in grouped_docs:
+                grouped_docs[dt] = {'fronts': [], 'backs': []}
+            
+            if item['side'] == 'front':
+                grouped_docs[dt]['fronts'].append(item['image'])
+            else:
+                grouped_docs[dt]['backs'].append(item['image'])
 
-                img_front_raw = Image.open(file_front).convert("RGB")
-                img_back_raw = Image.open(file_back).convert("RGB")
+        # Ghép cặp (Front + Back)
+        final_pairs = {}
+        total_pairs = 0
 
-                cropped_front = crop_card(np.array(img_front_raw))
-                cropped_back = crop_card(np.array(img_back_raw))
+        for dt, data in grouped_docs.items():
+            pairs = []
+            f_list, b_list = data['fronts'], data['backs']
+            
+            # Ưu tiên ghép front[i] với back[i]
+            min_len = min(len(f_list), len(b_list))
+            for i in range(min_len):
+                pairs.append((f_list[i], b_list[i]))
+            
+            if pairs:
+                final_pairs[dt] = pairs
+                total_pairs += len(pairs)
 
-                pil_front = Image.fromarray(cropped_front)
-                pil_back = Image.fromarray(cropped_back)
+        st.success(f"🎉 Đã tự động phân loại và ghép được **{total_pairs} bộ giấy tờ** hoàn chỉnh!")
 
-                card_pairs.append((pil_front, pil_back))
+        # Hiển thị kết quả đã phân loại
+        for dt, pairs in final_pairs.items():
+            st.markdown(f"### 📋 Loại: **{dt}** ({len(pairs)} bộ)")
+            cols = st.columns(min(len(pairs), 3))
+            for idx, (f, b) in enumerate(pairs):
+                with cols[idx % 3]:
+                    st.caption(f"{dt} - Bộ {idx+1}")
+                    st.image(f, caption="Mặt trước", use_container_width=True)
+                    st.image(b, caption="Mặt sau", use_container_width=True)
 
-                # Tạo trang A4 tương ứng
-                canvas = create_a4_canvas(pil_front, pil_back)
-                a4_canvases.append(canvas)
-
-        st.success(
-            f"✅ Đã xử lý thành công **{len(card_pairs)}** bộ {doc_type.split()[0]}!"
-        )
-
-        st.markdown("---")
-        st.subheader("📄 Xem trước kết quả")
-
-        # Hiển thị xem trước danh sách các trang A4
-        cols = st.columns(min(len(a4_canvases), 3))
-        for idx, canvas in enumerate(a4_canvases):
-            col_idx = idx % 3
-            cols[col_idx].image(
-                canvas,
-                caption=f"Bộ {idx + 1} (A4)",
-                use_container_width=True,
-            )
-
-        # Xuất file Word chung cho tất cả các trang
-        docx_io = create_multi_docx(card_pairs)
-
-        st.markdown("---")
-        st.subheader("📥 Tải về tập tin đã ghép")
-
-        btn_col1, btn_col2 = st.columns(2)
-
-        with btn_col1:
+        # Download File Word tổng hợp
+        if total_pairs > 0:
+            docx_file = create_multi_docx(final_pairs)
+            st.markdown("---")
             st.download_button(
-                label=f"📝 Tải WORD chứa {len(card_pairs)} bộ (.docx)",
-                data=docx_io,
-                file_name=f"{doc_type.split()[0]}_HangLoat.docx",
+                label=f"📝 Tải file WORD tổng hợp tất cả {total_pairs} bộ giấy tờ (.docx)",
+                data=docx_file,
+                file_name="GiayTo_DaPhanLoai_InA4.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
-            )
-
-        with btn_col2:
-            # Tải ảnh trang A4 đầu tiên (hoặc bộ đầu tiên)
-            img_io = io.BytesIO()
-            a4_canvases[0].save(img_io, format="PNG")
-            img_io.seek(0)
-
-            st.download_button(
-                label="🖼️ Tải ÁNH Trang 1 (.png)",
-                data=img_io,
-                file_name=f"{doc_type.split()[0]}_Trang1.png",
-                mime="image/png",
-                use_container_width=True,
+                use_container_width=True
             )
