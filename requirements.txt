@@ -3,4 +3,4 @@ opencv-python-headless
 pillow
 python-docx
 numpy
-easyocr
+pytesseract
