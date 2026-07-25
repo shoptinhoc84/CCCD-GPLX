@@ -134,6 +134,29 @@ def create_multi_docx(card_pairs):
     doc_io.seek(0)
     return doc_io
 
+def create_single_cropped_docx(pil_cropped_img):
+    """Xuất file Word riêng cho khối 2 mặt GPLX vừa cắt."""
+    doc = docx.Document()
+    for section in doc.sections:
+        section.top_margin = Inches(0.5)
+        section.bottom_margin = Inches(0.5)
+        section.left_margin = Inches(0.5)
+        section.right_margin = Inches(0.5)
+
+    buf = io.BytesIO()
+    pil_cropped_img.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    # Chèn ảnh khối 2 mặt với độ rộng chuẩn 3.5 inches
+    p.add_run().add_picture(buf, width=Inches(3.5))
+
+    doc_io = io.BytesIO()
+    doc.save(doc_io)
+    doc_io.seek(0)
+    return doc_io
+
 def create_a4_canvas_horizontal(card_pairs_chunk):
     a4_w, a4_h = 1240, 1754
     canvas = Image.new("RGB", (a4_w, a4_h), "white")
@@ -155,13 +178,9 @@ def create_a4_canvas_horizontal(card_pairs_chunk):
     return canvas
 
 # ---------------------------------------------------------
-# THUẬT TOÁN MỚI: CẮT KHUNG TRỌN BỘ 2 MẶT DỌC VNeID
+# THUẬT TOÁN CẮT KHUNG VNeID DỌC
 # ---------------------------------------------------------
 def crop_vneid_combined_block(pil_img):
-    """
-    Tự động tìm 2 thẻ GPLX và cắt lấy trọn khung gồm cả 2 mặt xếp dọc
-    như ảnh mẫu (loại bỏ thông tin văn bản bên dưới).
-    """
     img_np = np.array(pil_img)
     h_img, w_img, _ = img_np.shape
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
@@ -179,28 +198,22 @@ def crop_vneid_combined_block(pil_img):
             if 1.2 <= aspect_ratio <= 1.95 and w < w_img * 0.98:
                 card_boxes.append((x, y, w, h))
 
-    # Lọc trùng lặp
     filtered_boxes = []
     card_boxes = sorted(card_boxes, key=lambda b: b[1])
     for box in card_boxes:
         if not any(abs(box[1] - f[1]) < 30 for f in filtered_boxes):
             filtered_boxes.append(box)
 
-    # Nếu nhận diện được từ 2 thẻ
     if len(filtered_boxes) >= 2:
         b1, b2 = filtered_boxes[0], filtered_boxes[1]
-        
-        # Lấy tọa độ bao phủ cả thẻ 1 và thẻ 2
         min_x = min(b1[0], b2[0])
         max_x = max(b1[0] + b1[2], b2[0] + b2[2])
         min_y = min(b1[1], b2[1])
         max_y = max(b1[1] + b1[3], b2[1] + b2[3])
 
-        # Cắt lề cực gọn
         crop_np = img_np[max(0, min_y - 2):min(h_img, max_y + 2), max(0, min_x - 2):min(w_img, max_x + 2)]
         return Image.fromarray(crop_np)
 
-    # Dự phòng: Cắt theo khung chuẩn VNeID GPLX (từ mép trên thẻ 1 đến hết đáy thẻ 2)
     y1, y2 = int(h_img * 0.11), int(h_img * 0.655)
     x1, x2 = int(w_img * 0.035), int(w_img * 0.965)
     
@@ -344,11 +357,11 @@ with tab1:
 
 
 # =========================================================
-# TAB 2: CẮT KHUNG VNeID CHUẨN MẪU
+# TAB 2: CẮT KHUNG VNeID CHUẨN MẪU (NÚT TẢI LÊN ĐẦU)
 # =========================================================
 with tab2:
     st.subheader("✂️ Cắt Trọn Khung Bằng Lái Xe GPLX VNeID")
-    st.caption("Tải lên ảnh màn hình VNeID, hệ thống sẽ tự động loại bỏ thông tin thừa và chỉ giữ lại khung chứa 2 thẻ GPLX.")
+    st.caption("Tải lên ảnh màn hình VNeID, hệ thống sẽ tự động cắt khung chứa 2 thẻ GPLX.")
 
     col_vneid_up, col_vneid_res = st.columns([1, 1], gap="medium")
 
@@ -367,20 +380,34 @@ with tab2:
             with st.spinner("⏳ Đang nhận diện và cắt khung ảnh..."):
                 cropped_gplx_img = crop_vneid_combined_block(raw_vneid_img)
 
-                st.markdown("### 👁️ Kết quả xem trước:")
-                st.image(cropped_gplx_img, caption="Ảnh đã cắt chuẩn khung GPLX", use_container_width=True)
-
-                st.markdown("---")
-                
-                # Chuyển đổi ra BytesIO để tạo nút tải PNG
+                # Chuẩn bị dữ liệu tải
                 buf = io.BytesIO()
                 cropped_gplx_img.save(buf, format="PNG", optimize=True)
-                buf.seek(0)
+                buf_png = buf.getvalue()
 
-                st.download_button(
-                    label="🖼️ TẢI ẢNH CẮT PNG (.png)",
-                    data=buf.getvalue(),
-                    file_name="GPLX_VNeID_Cropped.png",
-                    mime="image/png",
-                    use_container_width=True
-                )
+                docx_cropped_io = create_single_cropped_docx(cropped_gplx_img)
+
+                # NÚT TẢI ĐẶT LÊN ĐẦU
+                st.markdown("### 📥 Tải về kết quả:")
+                
+                col_dl_word, col_dl_png = st.columns(2)
+                with col_dl_word:
+                    st.download_button(
+                        label="📝 TẢI FILE WORD (.docx)",
+                        data=docx_cropped_io,
+                        file_name="GPLX_VNeID_Cropped.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        use_container_width=True
+                    )
+                with col_dl_png:
+                    st.download_button(
+                        label="🖼️ TẢI ẢNH PNG (.png)",
+                        data=buf_png,
+                        file_name="GPLX_VNeID_Cropped.png",
+                        mime="image/png",
+                        use_container_width=True
+                    )
+
+                st.markdown("---")
+                st.markdown("### 👁️ Xem trước ảnh đã cắt:")
+                st.image(cropped_gplx_img, caption="Khung ảnh GPLX 2 mặt", use_container_width=True)
