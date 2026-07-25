@@ -1,6 +1,4 @@
-streamlit
-opencv-python-headless
-python-docx
-Pillow
-numpy
-easyocr
+tesseract-ocr
+tesseract-ocr-vie
+tesseract-ocr-eng
+libgl1-mesa-glx
