@@ -45,7 +45,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown('<div class="main-header">🖨️ Xử Lý & Dàn Trang Giấy Tờ A4 Super Fast</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">🖨️ Xử Lý & Dàn Trang Giấy Tờ Super Fast</div>', unsafe_allow_html=True)
 
 # Quản lý Session State
 if "uploader_key" not in st.session_state:
@@ -155,14 +155,32 @@ def create_a4_canvas_horizontal(card_pairs_chunk):
 
     return canvas
 
+def create_combined_pair_image(pil_front, pil_back, target_w=600, spacing=40, padding=30):
+    """Ghép mặt trước & mặt sau cạnh nhau thành 1 ảnh duy nhất trên nền trắng."""
+    ratio_f = target_w / pil_front.width
+    h_f = int(pil_front.height * ratio_f)
+    f_resized = pil_front.resize((target_w, h_f), Image.Resampling.LANCZOS)
+
+    ratio_b = target_w / pil_back.width
+    h_b = int(pil_back.height * ratio_b)
+    b_resized = pil_back.resize((target_w, h_b), Image.Resampling.LANCZOS)
+
+    canvas_w = target_w * 2 + spacing + padding * 2
+    canvas_h = max(h_f, h_b) + padding * 2
+
+    canvas = Image.new("RGB", (canvas_w, canvas_h), "white")
+    canvas.paste(f_resized, (padding, padding))
+    canvas.paste(b_resized, (padding + target_w + spacing, padding))
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    return buf
+
 # ---------------------------------------------------------
-# THUẬT TOÁN BỐ CỤC CHUYÊN CẮT 2 MẶT TỪ ẢNH MẪU VNeID
+# THUẬT TOÁN CẮT TÁCH VNeID GPLX
 # ---------------------------------------------------------
 def crop_vneid_gplx_two_sides(pil_img):
-    """
-    Tự động tìm kiếm vùng 2 thẻ GPLX xếp dọc trên màn hình VNeID
-    và tách thành mặt trước, mặt sau độc lập.
-    """
     img_np = np.array(pil_img)
     h_img, w_img, _ = img_np.shape
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
@@ -177,30 +195,21 @@ def crop_vneid_gplx_two_sides(pil_img):
         if area > (w_img * h_img * 0.05):
             x, y, w, h = cv2.boundingRect(cnt)
             aspect_ratio = float(w) / h
-            # Tỷ lệ thẻ GPLX chuẩn (~ 1.4 - 1.75)
             if 1.2 <= aspect_ratio <= 1.95 and w < w_img * 0.98:
                 card_boxes.append((x, y, w, h))
 
-    # Lọc trùng lặp bằng cách ghép các khung tương đương
     filtered_boxes = []
-    card_boxes = sorted(card_boxes, key=lambda b: b[1])  # Sắp xếp từ trên xuống dưới
+    card_boxes = sorted(card_boxes, key=lambda b: b[1])
     for box in card_boxes:
         if not any(abs(box[1] - f[1]) < 30 for f in filtered_boxes):
             filtered_boxes.append(box)
 
-    # Nếu tìm thấy đúng từ 2 thẻ trở lên
     if len(filtered_boxes) >= 2:
-        # Lấy khung trên (Mặt trước) và khung dưới (Mặt sau)
         b1, b2 = filtered_boxes[0], filtered_boxes[1]
-        
-        # Cắt lề 2px để nét hơn
         front_crop = img_np[max(0, b1[1]-2):min(h_img, b1[1]+b1[3]+2), max(0, b1[0]-2):min(w_img, b1[0]+b1[2]+2)]
         back_crop = img_np[max(0, b2[1]-2):min(h_img, b2[1]+b2[3]+2), max(0, b2[0]-2):min(w_img, b2[0]+b2[2]+2)]
-        
         return Image.fromarray(front_crop), Image.fromarray(back_crop)
     
-    # Dự phòng: Nếu thuật toán Contour không bắt được viền (do nền sáng quá/thiếu tương phản),
-    # dùng thuật toán cắt cố định theo vùng hiển thị chuẩn VNeID GPLX.
     y1, y2 = int(h_img * 0.11), int(h_img * 0.38)
     y3, y4 = int(h_img * 0.39), int(h_img * 0.65)
     x1, x2 = int(w_img * 0.04), int(w_img * 0.96)
@@ -347,55 +356,59 @@ with tab1:
 
 
 # =========================================================
-# TAB 2: CẮT TÁCH 2 MẶT TỪ ẢNH VNeID GPLX (TÍNH NĂNG MỚI)
+# TAB 2: CẮT TÁCH 2 MẶT TỪ ẢNH VNeID GPLX (ĐÃ CẬP NHẬT TẢI GHÉP)
 # =========================================================
 with tab2:
-    st.subheader("✂️ Cắt Tách Mặt Trước & Mặt Sau Từ Ảnh GPLX VNeID")
-    st.caption("Tải lên ảnh chụp màn hình ứng dụng VNeID / Dịch vụ công (chứa 2 mặt xếp dọc), hệ thống sẽ tự động tách rời 2 mặt.")
+    st.subheader("✂️ Cắt Tách & Ghép 2 Mặt Từ Ảnh GPLX VNeID")
+    st.caption("Tải ảnh màn hình VNeID, ứng dụng sẽ tự động tách 2 mặt và xuất ra 1 file Word hoặc 1 file PNG chứa cả 2 mặt.")
 
     col_vneid_up, col_vneid_res = st.columns([1, 1], gap="medium")
 
     with col_vneid_up:
         uploaded_vneid = st.file_uploader(
-            " Tải ảnh chụp màn hình GPLX VNeID:",
+            "📥 Tải ảnh chụp màn hình GPLX VNeID:",
             type=["jpg", "jpeg", "png"],
             key="vneid_uploader"
         )
         if uploaded_vneid:
             raw_vneid_img = Image.open(uploaded_vneid).convert("RGB")
-            st.image(raw_vneid_img, caption="Ảnh gốc đã tải lên", use_container_width=True)
+            st.image(raw_vneid_img, caption="Ảnh chụp màn hình gốc", use_container_width=True)
 
     with col_vneid_res:
         if uploaded_vneid:
             with st.spinner("⏳ Đang nhận diện và cắt mặt trước & sau..."):
                 img_front, img_back = crop_vneid_gplx_two_sides(raw_vneid_img)
 
-                col_f, col_b = st.columns(2)
-                
-                # Mặt trước
-                with col_f:
-                    st.markdown("**1. Mặt trước**")
-                    st.image(img_front, use_container_width=True)
-                    buf_f = io.BytesIO()
-                    img_front.save(buf_f, format="PNG")
-                    st.download_button(
-                        label="⬇️ Tải Mặt Trước",
-                        data=buf_f.getvalue(),
-                        file_name="GPLX_MatTruoc.png",
-                        mime="image/png",
-                        use_container_width=True
-                    )
+                # Tạo file Word chứa 1 cặp mặt trước + sau
+                docx_single = create_multi_docx([(img_front, img_back)])
 
-                # Mặt sau
-                with col_b:
-                    st.markdown("**2. Mặt sau**")
-                    st.image(img_back, use_container_width=True)
-                    buf_b = io.BytesIO()
-                    img_back.save(buf_b, format="PNG")
-                    st.download_button(
-                        label="⬇️ Tải Mặt Sau",
-                        data=buf_b.getvalue(),
-                        file_name="GPLX_MatSau.png",
-                        mime="image/png",
-                        use_container_width=True
-                    )
+                # Tạo ảnh PNG duy nhất ghép cả 2 mặt nằm ngang
+                combined_png_buf = create_combined_pair_image(img_front, img_back)
+
+                st.markdown("### 👁️ Kết quả xem trước:")
+                
+                # Hiển thị ảnh xem trước dạng ghép 2 mặt
+                st.image(combined_png_buf.getvalue(), caption="Ảnh ghép 2 mặt GPLX", use_container_width=True)
+
+                st.markdown("---")
+                st.markdown("### 📥 Tải về file hoàn chỉnh (gồm cả 2 mặt):")
+
+                # Nút 1: Tải File Word chứa cả 2 mặt
+                st.download_button(
+                    label="📝 TẢI FILE WORD (.docx)",
+                    data=docx_single,
+                    file_name="GPLX_2Mat_VNeID.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    use_container_width=True
+                )
+
+                st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+
+                # Nút 2: Tải File PNG ghép sẵn cả 2 mặt
+                st.download_button(
+                    label="🖼️ TẢI ẢNH PNG GHÉP 2 MẶT (.png)",
+                    data=combined_png_buf.getvalue(),
+                    file_name="GPLX_2Mat_VNeID.png",
+                    mime="image/png",
+                    use_container_width=True
+                )
