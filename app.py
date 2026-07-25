@@ -32,10 +32,10 @@ def preprocess_for_ocr(pil_img):
 
 def extract_dates(text):
     """Trích xuất ngày tháng linh hoạt (chấp nhận /, ., - hoặc khoảng trắng)."""
-    # Regex tìm ngày tháng dạng DD/MM/YYYY, DD.MM.YYYY, DD-MM-YYYY
     pattern = r'\b(\d{2})[/.\-\s](\d{2})[/.\-\s](\d{4})\b'
     matches = re.findall(pattern, text)
-    formatted_dates = [f"{m[0]}/{m[1]}/{m[2]}" for m m in matches]
+    # Đã sửa lỗi cú pháp ở dòng này:
+    formatted_dates = [f"{m[0]}/{m[1]}/{m[2]}" for m in matches]
     return formatted_dates
 
 def process_auto_batch_ocr(list_uploaded_files):
@@ -48,7 +48,7 @@ def process_auto_batch_ocr(list_uploaded_files):
 
     logs = []
 
-    # Danh sách từ khóa cấm xuất hiện trong Tên (chứa cả từ đơn nhiễu)
+    # Danh sách từ khóa cấm xuất hiện trong Tên
     forbidden_words = [
         "CONG", "HOA", "XA", "HOI", "CHU", "NGHIA", "VIET", "NAM",
         "DOC", "LAP", "TU", "DO", "HANH", "PHUC", "CAN", "CUOC",
@@ -121,27 +121,24 @@ def process_auto_batch_ocr(list_uploaded_files):
             for i, line in enumerate(lines):
                 line_upper = line.upper()
                 
-                # Cách 1: Tìm dòng đứng ngay sau chữ "HỌ VÀ TÊN" / "FULL NAME"
+                # Tìm dòng đứng ngay sau chữ "HỌ VÀ TÊN" / "FULL NAME"
                 if any(kw in line_upper for kw in ["HỌ VÀ TÊN", "HO VA TEN", "FULL NAME", "HỌ TÊN"]):
-                    # Nếu tên nằm cùng dòng với nhãn
                     after_label = re.sub(r'.*(HỌ VÀ TÊN|HO VA TEN|FULL NAME|HỌ TÊN)[:\s]*', '', line_upper)
                     clean_after = re.sub(r'[^A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚƯÝĐ\s]', '', after_label).strip()
                     if len(clean_after) >= 5 and len(clean_after.split()) >= 2:
                         data["ho_ten"] = clean_after
                         break
                     
-                    # Nếu tên nằm ở dòng tiếp theo ngay phía dưới
                     elif i + 1 < len(lines):
                         next_line = lines[i+1].upper()
                         clean_next = re.sub(r'[^A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚƯÝĐ\s]', '', next_line).strip()
-                        # Kiểm tra xem dòng tiếp theo có bị dính từ cấm không
                         words = clean_next.split()
                         if len(clean_next) >= 5 and len(words) >= 2:
                             if not any(w in forbidden_words for w in words):
                                 data["ho_ten"] = clean_next
                                 break
 
-            # Cách 2 (Dự phòng): Lọc từng dòng nếu Cách 1 không tìm thấy
+            # Dự phòng nếu không tìm thấy theo tiêu đề
             if not data["ho_ten"]:
                 for line in lines:
                     line_upper = line.upper()
@@ -149,7 +146,6 @@ def process_auto_batch_ocr(list_uploaded_files):
                     words = clean_line.split()
                     
                     if len(clean_line) >= 5 and len(words) >= 2:
-                        # Bỏ qua nếu có bất kỳ từ cấm nào trong dòng
                         if any(w in forbidden_words for w in words):
                             continue
                         data["ho_ten"] = clean_line
