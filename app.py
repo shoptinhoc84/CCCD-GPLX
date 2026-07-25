@@ -10,6 +10,9 @@ import numpy as np
 from PIL import Image
 import streamlit as st
 
+# Sử dụng Pytesseract nhẹ nhàng, không load model AI nặng vào RAM
+import pytesseract
+
 # ---------------------------------------------------------
 # CẤU HÌNH TRANG & GIAO DIỆN
 # ---------------------------------------------------------
@@ -220,14 +223,9 @@ def crop_vneid_combined_block(pil_img):
     return Image.fromarray(crop_np)
 
 # ---------------------------------------------------------
-# THUẬT TOÁN TAB 3: TỰ ĐỘNG PHÂN LOẠI ẢNH & LỌC DỮ LIỆU
+# THUẬT TOÁN TAB 3: TRÍCH XUẤT CỰC NHẸ (KHÔNG BỊ TRÀN RAM)
 # ---------------------------------------------------------
 def process_auto_batch_ocr(list_uploaded_files):
-    """
-    Quét tự động danh sách ảnh đầu vào:
-    - Nhận diện ảnh nào là CCCD/GPLX
-    - Rút trích đầy đủ thông tin cá nhân
-    """
     data = {
         "ho_ten": "", "ngay_sinh": "", "so_cccd": "", "ngay_cap_cccd": "",
         "noi_cap_cccd": "Cục Cảnh sát quản lý hành chính về trật tự xã hội",
@@ -235,26 +233,26 @@ def process_auto_batch_ocr(list_uploaded_files):
         "hang_dang_ky": "A1", "vi_pham": "Không", "sdt": ""
     }
 
-    try:
-        import easyocr
-        reader = easyocr.Reader(['en'], gpu=False, quantize=True)
-    except Exception as e:
-        st.error("Không thể khởi động bộ OCR do bộ nhớ RAM đầy. Hãy bấm làm mới.")
-        return data, []
-
     logs = []
 
     for idx, file in enumerate(list_uploaded_files):
         img = Image.open(file).convert("RGB")
-        img_np = np.array(img)
         
-        # Đọc văn bản từ ảnh
-        results = reader.readtext(img_np, detail=0)
-        full_text = " ".join(results).upper()
+        # Tối ưu kích thước ảnh trước khi OCR để tốn cực ít bộ nhớ
+        img_opt = optimize_image_size(img, max_dim=1200)
 
-        # TỰ ĐỘNG PHÂN LOẠI
-        is_gplx = ("GIẤY PHÉP LÁI XE" in full_text) or ("DRIVER" in full_text) or ("HANG/CLASS" in full_text)
-        is_cccd = ("CĂN CƯỚC" in full_text) or ("CAN CUOC" in full_text) or ("CITIZEN" in full_text) or (re.search(r'\b\d{12}\b', full_text) and not is_gplx)
+        try:
+            full_text = pytesseract.image_to_string(img_opt, lang='eng+vie').upper()
+        except Exception:
+            try:
+                full_text = pytesseract.image_to_string(img_opt, lang='eng').upper()
+            except Exception:
+                full_text = ""
+
+        lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+
+        is_gplx = ("GIẤY PHÉP LÁI XE" in full_text) or ("DRIVER" in full_text) or ("CLASS" in full_text)
+        is_cccd = ("CĂN CƯỚC" in full_text) or ("CITIZEN" in full_text) or ("SOCIALIST" in full_text) or ("CAN CUOC" in full_text)
 
         if is_gplx:
             logs.append(f"📸 Ảnh #{idx+1}: Nhận diện là **GPLX**")
@@ -262,7 +260,7 @@ def process_auto_batch_ocr(list_uploaded_files):
             if gplx_match:
                 data["so_gplx"] = gplx_match.group(0)
 
-            hang_match = re.search(r'HẠNG/CLASS:\s*([A-Z0-9]+)', full_text)
+            hang_match = re.search(r'(?:HẠNG|CLASS)[:\s]*([A-Z0-9]+)', full_text)
             if hang_match:
                 data["hang_gplx"] = hang_match.group(1)
 
@@ -270,10 +268,14 @@ def process_auto_batch_ocr(list_uploaded_files):
             if dates_g:
                 data["ngay_cap_gplx"] = dates_g[0]
 
-        elif is_cccd:
-            logs.append(f"📸 Ảnh #{idx+1}: Nhận diện là **CCCD / Căn cước**")
+        else:
+            if is_cccd:
+                logs.append(f"📸 Ảnh #{idx+1}: Nhận diện là **CCCD / Căn cước**")
+            else:
+                logs.append(f"📸 Ảnh #{idx+1}: Quét dữ liệu bổ sung...")
+
             id_match = re.search(r'\b\d{12}\b', full_text)
-            if id_match:
+            if id_match and not data["so_cccd"]:
                 data["so_cccd"] = id_match.group(0)
 
             date_matches = re.findall(r'\b\d{2}/\d{2}/\d{4}\b', full_text)
@@ -283,30 +285,23 @@ def process_auto_batch_ocr(list_uploaded_files):
                 if len(date_matches) > 1 and not data["ngay_cap_cccd"]:
                     data["ngay_cap_cccd"] = date_matches[1]
 
-            # Rút trích Họ tên chữ IN HOA
-            for text in results:
-                clean_t = text.strip()
-                if clean_t.isupper() and len(clean_t) > 5 and not any(char.isdigit() for char in clean_t):
-                    if "CONG HOA" not in clean_t and "CAN CUOC" not in clean_t and "VIET NAM" not in clean_t:
+            # Rút trích Họ tên
+            for line in lines:
+                clean_l = line.strip()
+                if clean_l.isupper() and len(clean_l) > 5 and not any(char.isdigit() for char in clean_l):
+                    if "CONG HOA" not in clean_l and "CAN CUOC" not in clean_l and "VIET NAM" not in clean_l:
                         if not data["ho_ten"]:
-                            data["ho_ten"] = clean_t
+                            data["ho_ten"] = clean_l
                             break
-        else:
-            logs.append(f"📸 Ảnh #{idx+1}: Phân tích dữ liệu bổ sung...")
-            # Quét tìm thông tin còn thiếu nếu ảnh không rõ tiêu đề
-            id_match = re.search(r'\b\d{12}\b', full_text)
-            if id_match and not data["so_cccd"]:
-                data["so_cccd"] = id_match.group(0)
 
-            date_matches = re.findall(r'\b\d{2}/\d{2}/\d{4}\b', full_text)
-            if date_matches and not data["ngay_sinh"]:
-                data["ngay_sinh"] = date_matches[0]
+        # Giải phóng bộ nhớ liên tục
+        del img, img_opt
+        gc.collect()
 
     return data, logs
 
 def generate_don_de_nghi_docx(d):
     doc = docx.Document()
-    
     for section in doc.sections:
         section.top_margin = Inches(0.6)
         section.bottom_margin = Inches(0.6)
@@ -316,18 +311,15 @@ def generate_don_de_nghi_docx(d):
     p_head = doc.add_paragraph()
     p_head.alignment = WD_ALIGN_PARAGRAPH.CENTER
     r1 = p_head.add_run("CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM\n")
-    r1.bold = True
-    r1.font.size = Pt(12)
+    r1.bold = True; r1.font.size = Pt(12)
     r2 = p_head.add_run("Độc lập – Tự do – Hạnh phúc\n")
-    r2.bold = True
-    r2.font.size = Pt(13)
+    r2.bold = True; r2.font.size = Pt(13)
     p_head.paragraph_format.space_after = Pt(12)
 
     p_title = doc.add_paragraph()
     p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     rt = p_title.add_run("ĐƠN ĐỀ NGHỊ\nHỌC, DỰ SÁT HẠCH ĐỂ CẤP GIẤY PHÉP LÁI XE\n")
-    rt.bold = True
-    rt.font.size = Pt(14)
+    rt.bold = True; rt.font.size = Pt(14)
     p_title.paragraph_format.space_after = Pt(12)
 
     p_kg = doc.add_paragraph()
@@ -343,8 +335,7 @@ def generate_don_de_nghi_docx(d):
     
     p_body.add_run("Tôi là (CHỮ IN HOA): ").font.size = Pt(12)
     r_name = p_body.add_run(f"{d['ho_ten'].upper()}\n")
-    r_name.bold = True
-    r_name.font.size = Pt(12)
+    r_name.bold = True; r_name.font.size = Pt(12)
 
     p_body.add_run(f"Ngày tháng năm sinh: {d['ngay_sinh']}\n").font.size = Pt(12)
     p_body.add_run(f"Số Căn cước công dân/Căn cước hoặc Hộ chiếu: {d['so_cccd']}\n").font.size = Pt(12)
@@ -354,8 +345,7 @@ def generate_don_de_nghi_docx(d):
     
     p_body.add_run("Đề nghị cho tôi được học, dự sát hạch để cấp giấy phép lái xe hạng: ").font.size = Pt(12)
     r_h = p_body.add_run(f"{d['hang_dang_ky']}\n")
-    r_h.bold = True
-    r_h.font.size = Pt(12)
+    r_h.bold = True; r_h.font.size = Pt(12)
 
     is_vp_co = "[ X ] Có   [   ] Không" if d['vi_pham'] == "Có" else "[   ] Có   [ X ] Không"
     p_body.add_run(f"Vi phạm hành chính trong lĩnh vực giao thông đường bộ với hình thức tước quyền sử dụng giấy phép lái xe: {is_vp_co}\n\n").font.size = Pt(12)
@@ -376,7 +366,6 @@ def generate_don_de_nghi_docx(d):
     
     r_sub_name = p_sign.add_run(f"{d['ho_ten'].upper()}\n")
     r_sub_name.bold = True
-    
     p_sign.add_run(f"Số điện thoại: {d['sdt']}").font.size = Pt(11)
 
     doc_io = io.BytesIO()
@@ -391,7 +380,7 @@ def generate_don_de_nghi_docx(d):
 tab1, tab2, tab3 = st.tabs([
     "🖨️ Dàn Trang A4 (Hàng Loạt)", 
     "✂️ Cắt Ảnh Khung GPLX VNeID", 
-    "📝 Đơn Đề Nghị Học GPLX (Tự Động Nhận Diện)"
+    "📝 Đơn Đề Nghị Học GPLX (Tự Động)"
 ])
 
 # =========================================================
@@ -580,7 +569,7 @@ with tab2:
 
 
 # =========================================================
-# TAB 3: TỰ ĐỘNG PHÂN LOẠI & LỌC DỮ LIỆU ĐƠN HỌC (MỚI)
+# TAB 3: TRÍCH XUẤT CỰC NHẸ BẰNG TESSERACT (KHÔNG SẬP)
 # =========================================================
 with tab3:
     st.subheader("📝 Tự Động Phân Loại & Điền File Word 'Đơn Đề Nghị Học GPLX'")
@@ -597,7 +586,7 @@ with tab3:
             key="ocr_batch_uploader"
         )
         
-        btn_ocr = st.button("🔍 Đọc & Phân Loại Tự Động (AI)", use_container_width=True, type="primary")
+        btn_ocr = st.button("🔍 Đọc & Phân Loại Tự Động", use_container_width=True, type="primary")
 
         if "form_data" not in st.session_state:
             st.session_state["form_data"] = {
@@ -614,7 +603,6 @@ with tab3:
                 with st.spinner("⏳ Đang nhận diện & phân loại giấy tờ..."):
                     extracted, logs = process_auto_batch_ocr(up_batch)
                     
-                    # Cập nhật thông tin nhận diện vào session
                     for k, v in extracted.items():
                         if v:
                             st.session_state["form_data"][k] = v
@@ -659,7 +647,6 @@ with tab3:
 
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # Tạo & Tải File Word
         docx_don_io = generate_don_de_nghi_docx(fd)
         
         st.download_button(
