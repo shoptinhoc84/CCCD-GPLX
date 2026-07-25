@@ -1,5 +1,6 @@
 streamlit
 opencv-python-headless
-numpy
-pillow
 python-docx
+Pillow
+numpy
+easyocr
