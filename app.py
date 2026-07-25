@@ -135,7 +135,6 @@ def create_multi_docx(card_pairs):
     return doc_io
 
 def create_single_cropped_docx(pil_cropped_img):
-    """Xuất file Word riêng cho khối 2 mặt GPLX vừa cắt."""
     doc = docx.Document()
     for section in doc.sections:
         section.top_margin = Inches(0.5)
@@ -149,7 +148,6 @@ def create_single_cropped_docx(pil_cropped_img):
 
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    # Chèn ảnh khối 2 mặt với độ rộng chuẩn 3.5 inches
     p.add_run().add_picture(buf, width=Inches(3.5))
 
     doc_io = io.BytesIO()
@@ -178,7 +176,7 @@ def create_a4_canvas_horizontal(card_pairs_chunk):
     return canvas
 
 # ---------------------------------------------------------
-# THUẬT TOÁN CẮT KHUNG VNeID DỌC
+# THUẬT TOÁN CẮT KHUNG VNeID (ĐÃ BỔ SUNG LỀ DƯỚI RỘNG HƠN)
 # ---------------------------------------------------------
 def crop_vneid_combined_block(pil_img):
     img_np = np.array(pil_img)
@@ -211,10 +209,15 @@ def crop_vneid_combined_block(pil_img):
         min_y = min(b1[1], b2[1])
         max_y = max(b1[1] + b1[3], b2[1] + b2[3])
 
-        crop_np = img_np[max(0, min_y - 2):min(h_img, max_y + 2), max(0, min_x - 2):min(w_img, max_x + 2)]
+        # Tăng lề dưới lên +12px và lề ngang +6px để không bị lém viền
+        crop_np = img_np[
+            max(0, min_y - 6) : min(h_img, max_y + 14), 
+            max(0, min_x - 6) : min(w_img, max_x + 6)
+        ]
         return Image.fromarray(crop_np)
 
-    y1, y2 = int(h_img * 0.11), int(h_img * 0.655)
+    # Dự phòng nâng mép đáy từ 0.655 -> 0.67 để thoáng chân thẻ
+    y1, y2 = int(h_img * 0.11), int(h_img * 0.67)
     x1, x2 = int(w_img * 0.035), int(w_img * 0.965)
     
     crop_np = img_np[y1:y2, x1:x2]
@@ -357,7 +360,7 @@ with tab1:
 
 
 # =========================================================
-# TAB 2: CẮT KHUNG VNeID CHUẨN MẪU (NÚT TẢI LÊN ĐẦU)
+# TAB 2: CẮT KHUNG VNeID CHUẨN MẪU (ĐÃ TĂNG LỀ DƯỚI)
 # =========================================================
 with tab2:
     st.subheader("✂️ Cắt Trọn Khung Bằng Lái Xe GPLX VNeID")
@@ -387,7 +390,7 @@ with tab2:
 
                 docx_cropped_io = create_single_cropped_docx(cropped_gplx_img)
 
-                # NÚT TẢI ĐẶT LÊN ĐẦU
+                # NÚT TẢI LÊN ĐẦU
                 st.markdown("### 📥 Tải về kết quả:")
                 
                 col_dl_word, col_dl_png = st.columns(2)
