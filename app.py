@@ -7,11 +7,11 @@ import re
 import gc
 
 # ---------------------------------------------------------
-# TẤT CẢ HÀM XỬ LÝ VÀ TỐI ƯU ẢNH (CHỐNG LỖI RAM & TREO WEB)
+# HÀM XỬ LÝ VÀ TỐI ƯU ẢNH
 # ---------------------------------------------------------
 
-def optimize_image_size(pil_img, max_dim=1000):
-    """Giảm kích thước ảnh xuống mức vừa đủ cho Tesseract đọc tốt mà không gây treo RAM."""
+def optimize_image_size(pil_img, max_dim=1200):
+    """Giảm kích thước ảnh nhẹ nhàng để tránh đơ app nhưng giữ đủ nét."""
     width, height = pil_img.size
     if max(width, height) > max_dim:
         scale = max_dim / float(max(width, height))
@@ -20,32 +20,17 @@ def optimize_image_size(pil_img, max_dim=1000):
         return pil_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
     return pil_img
 
-def preprocess_for_ocr(pil_img):
-    """
-    Xử lý ảnh nhanh, nhẹ RAM và tối ưu cho Tesseract.
-    Sử dụng CLAHE thay cho cv2.detailEnhance để tránh ngốn RAM làm treo web.
-    """
+def preprocess_for_digits(pil_img):
+    """Ảnh tăng tương phản chuyên biệt cho việc quét SỐ (CCCD / GPLX / Ngày tháng)."""
     img_np = np.array(pil_img)
-    
-    # Chuyển sang ảnh xám
     gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-    
-    # Tăng độ tương phản nhẹ bằng CLAHE (Nhanh và không tốn RAM)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
-    
-    # Khử nhiễu nhẹ
     blur = cv2.GaussianBlur(enhanced, (3, 3), 0)
-    
-    # Nhị phân hóa Otsu
     _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
     return Image.fromarray(thresh)
 
 def process_auto_batch_ocr(list_uploaded_files):
-    """
-    Hàm xử lý quét ảnh OCR lấy thông tin CCCD và GPLX.
-    """
     data = {
         "ho_ten": "", "ngay_sinh": "", "so_cccd": "", "ngay_cap_cccd": "",
         "noi_cap_cccd": "Cục Cảnh sát quản lý hành chính về trật tự xã hội",
@@ -55,28 +40,33 @@ def process_auto_batch_ocr(list_uploaded_files):
 
     logs = []
 
-    # Danh sách từ khóa gây nhiễu cần loại bỏ khỏi trường Họ Tên
+    # Danh sách từ khóa nhiễu được bổ sung triệt để
     stop_words_name = [
         "CONG HOA", "XHCN", "VIET NAM", "DOC LAP", "TU DO", "HANH PHUC",
         "CAN CUOC", "CONG DAN", "SOCIALIST", "REPUBLIC", "IDENTITY", "CARD",
         "GIAY PHEP", "LAI XE", "DRIVER", "LICENSE", "HO TEN", "FULL NAME",
         "NGAY SINH", "DATE OF BIRTH", "QUOC TICH", "NATIONALITY", "NOI DANG KY",
-        "EXPIRE", "CSGT", "CUC CANH SAT"
+        "EXPIRE", "CSGT", "CUC CANH SAT", "SEX", "GIOI TINH", "QUE QUAN",
+        "NOI TRU", "PLACE OF ORIGIN", "PLACE OF RESIDENCE", "PERSONAL IDENTIFICATION"
     ]
 
     for idx, file in enumerate(list_uploaded_files):
         img_raw = Image.open(file).convert("RGB")
+        img_opt = optimize_image_size(img_raw, max_dim=1200)
         
-        # Tối ưu kích thước (max_dim=1000px)
-        img_opt = optimize_image_size(img_raw, max_dim=1000)
-        img_proc = preprocess_for_ocr(img_opt)
+        # Quét 1: Dùng ảnh GỐC để trích xuất CHỮ TIẾNG VIỆT (Tên, Ngày tháng)
+        text_raw = pytesseract.image_to_string(img_opt, lang='vie+eng')
         
-        # Quét 1 lần duy nhất với cả gói eng + vie để tránh đơ CPU
-        full_text = pytesseract.image_to_string(img_proc, lang='eng+vie').upper()
-        lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+        # Quét 2: Dùng ảnh NHỊ PHÂN để trích xuất SỐ chuẩn xác
+        img_proc = preprocess_for_digits(img_opt)
+        text_digits = pytesseract.image_to_string(img_proc, lang='eng')
 
-        is_gplx = ("GIẤY PHÉP LÁI XE" in full_text) or ("DRIVER" in full_text) or ("SỐ/NO" in full_text)
-        is_cccd = ("CĂN CƯỚC" in full_text) or ("CAN CUOC" in full_text) or ("CITIZEN" in full_text) or ("SỐ / NO" in full_text)
+        full_text = text_raw + "\n" + text_digits
+        full_text_upper = full_text.upper()
+        lines = [line.strip() for line in text_raw.split('\n') if line.strip()]
+
+        is_gplx = ("GIẤY PHÉP LÁI XE" in full_text_upper) or ("DRIVER" in full_text_upper) or ("SỐ/NO" in full_text_upper)
+        is_cccd = ("CĂN CƯỚC" in full_text_upper) or ("CAN CUOC" in full_text_upper) or ("CITIZEN" in full_text_upper) or ("SỐ / NO" in full_text_upper)
 
         if is_gplx:
             logs.append(f"📸 Ảnh #{idx+1}: Nhận diện là **GPLX**")
@@ -86,15 +76,15 @@ def process_auto_batch_ocr(list_uploaded_files):
             if gplx_match:
                 data["so_gplx"] = gplx_match.group(0)
 
-            # Quét hạng GPLX (A1, A2, B1, B2, C...)
-            hang_match = re.search(r'HẠNG[/\s]*CLASS[:\s]*([A-Z0-9]{1,3})', full_text)
+            # Quét hạng GPLX
+            hang_match = re.search(r'HẠNG[/\s]*CLASS[:\s]*([A-Z0-9]{1,3})', full_text_upper)
             if hang_match:
                 found_hang = hang_match.group(1).strip()
                 if found_hang in ["A1", "A2", "A3", "A4", "A", "B1", "B2", "B", "C", "D", "E", "FC", "FE"]:
                     data["hang_gplx"] = found_hang
             else:
                 for h in ["A1", "A2", "B2", "B1", "A", "C", "D"]:
-                    if f"HẠNG {h}" in full_text or f"CLASS {h}" in full_text or f"HẠNG/CLASS {h}" in full_text:
+                    if f"HẠNG {h}" in full_text_upper or f"CLASS {h}" in full_text_upper:
                         data["hang_gplx"] = h
                         break
 
@@ -122,16 +112,25 @@ def process_auto_batch_ocr(list_uploaded_files):
                 if len(date_matches) > 1 and not data["ngay_cap_cccd"]:
                     data["ngay_cap_cccd"] = date_matches[1]
 
-            # 3. Lọc lấy Họ Tên (chữ IN HOA nguyên dòng)
+            # 3. Lọc lấy Họ Tên chuẩn xác
             for line in lines:
-                clean_l = re.sub(r'[^A-Z\s]', '', line).strip()
-                if clean_l.isupper() and len(clean_l) > 5 and len(clean_l.split()) >= 2:
-                    if not any(stop_word in clean_l for stop_word in stop_words_name):
-                        if not data["ho_ten"]:
-                            data["ho_ten"] = clean_l
-                            break
+                line_clean = line.strip()
+                line_upper = line_clean.upper()
+                
+                # Kiểm tra từ khóa nhiễu
+                if any(stop_word in line_upper for stop_word in stop_words_name):
+                    continue
+                
+                # Bắt các dòng viết hoa toàn bộ (bao gồm cả chữ cái Tiếng Việt có dấu)
+                # Loại bỏ các ký tự đặc biệt hoặc số
+                clean_name = re.sub(r'[^A-ZÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚƯÝĐ\s]', '', line_upper).strip()
+                
+                if len(clean_name) >= 5 and len(clean_name.split()) >= 2:
+                    if not data["ho_ten"]:
+                        data["ho_ten"] = clean_name
+                        break
 
-        # Giải phóng bộ nhớ ngay lập tức
+        # Giải phóng bộ nhớ
         del img_raw, img_opt, img_proc
         gc.collect()
 
