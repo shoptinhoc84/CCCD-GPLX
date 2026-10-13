@@ -192,28 +192,63 @@ def detect_card_candidates(pil_img: Image.Image, max_candidates: int = 10):
     return [(quad, confidence) for quad, confidence, _ in dedup]
 
 
-def crop_quad(pil_img: Image.Image, points, output_width: int = 1280) -> Image.Image:
+def expand_quad_perspective(points, safety_margin_pct: float = 4.0) -> np.ndarray:
+    """Nới khung crop theo bốn cạnh của thẻ, kể cả ảnh chụp méo phối cảnh.
+
+    Khung xanh là biên phát hiện; khung cam là vùng lấy thêm xung quanh.
+    Tính thêm % theo kích thước THẺ, không theo ảnh gốc (phù hợp mọi khoảng cách chụp).
+    """
+    pts = _order_quad(points)
+    m = max(0.0, min(float(safety_margin_pct), 12.0)) / 100.0
+    normal = np.float32([[0, 0], [1, 0], [1, 1], [0, 1]])
+    outer = np.float32([[-m, -m], [1 + m, -m], [1 + m, 1 + m], [-m, 1 + m]])
+    perspective = cv2.getPerspectiveTransform(normal, pts)
+    return cv2.perspectiveTransform(outer[None, :, :], perspective)[0]
+
+
+def crop_quad(
+    pil_img: Image.Image,
+    points,
+    output_width: int = 1280,
+    safety_margin_pct: float = 4.0,
+) -> Image.Image:
+    """Nắn thẻ kèm biên an toàn (4% mặc định, điều chỉnh được trên Web).
+
+    Điểm phát hiện được chiếu vào bên TRONG ảnh kết quả, nhờ đó không cắt
+    xém mất mép. Dùng nền trắng cho phần vượt khỏi ảnh gốc, tuyệt đối không
+    lặp pixel mép bằng BORDER_REPLICATE vì dễ tạo viền/thông tin giả.
+    """
     pts = _order_quad(points)
     w, h, _ = _quad_geometry(pts)
     landscape = w >= h
-    # Ảnh thẻ xoay dọc: nắn thành khung dọc trước, sau đó quay ngang.
     out_w, out_h = ((output_width, round(output_width / CARD_ASPECT)) if landscape
                     else (round(output_width / CARD_ASPECT), output_width))
-    dst = np.array([[0, 0], [out_w - 1, 0], [out_w - 1, out_h - 1], [0, out_h - 1]], np.float32)
+    m = max(0.0, min(float(safety_margin_pct), 12.0)) / 100.0
+    # Tỷ lệ phần viền so với kích thước thẻ sau nắn: m/(1+2m).
+    edge_fraction = m / (1.0 + 2.0 * m)
+    inset_x = round((out_w - 1) * edge_fraction)
+    inset_y = round((out_h - 1) * edge_fraction)
+    dst = np.float32([
+        [inset_x, inset_y],
+        [out_w - 1 - inset_x, inset_y],
+        [out_w - 1 - inset_x, out_h - 1 - inset_y],
+        [inset_x, out_h - 1 - inset_y],
+    ])
     mat = cv2.getPerspectiveTransform(pts, dst)
-    warped = cv2.warpPerspective(np.asarray(pil_img.convert("RGB")), mat, (out_w, out_h),
-                                 flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+    warped = cv2.warpPerspective(np.asarray(pil_img.convert('RGB')), mat, (out_w, out_h),
+                                 flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT,
+                                 borderValue=(255, 255, 255))
     if not landscape:
         warped = cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
     return Image.fromarray(warped)
 
 
-def auto_crop(pil_img: Image.Image):
+def auto_crop(pil_img: Image.Image, safety_margin_pct: float = 4.0):
     matches = detect_card_candidates(pil_img)
     if not matches:
         return pil_img.copy(), None, 0.0
     quad, quality = matches[0]
-    return crop_quad(pil_img, quad), quad, quality
+    return crop_quad(pil_img, quad, safety_margin_pct=safety_margin_pct), quad, quality
 
 
 def crop_rectangle(pil_img: Image.Image, left_pct, top_pct, right_pct, bottom_pct) -> Image.Image:
@@ -227,7 +262,8 @@ def crop_rectangle(pil_img: Image.Image, left_pct, top_pct, right_pct, bottom_pc
     return pil_img.crop((x1, y1, x2, y2))
 
 
-def draw_detected_outline(pil_img: Image.Image, quad=None, percentage_corners=None) -> Image.Image:
+def draw_detected_outline(pil_img: Image.Image, quad=None, percentage_corners=None,
+                          safety_margin_pct: float = 0.0) -> Image.Image:
     preview = pil_img.copy()
     preview.thumbnail((700, 700), Image.Resampling.LANCZOS)
     sx, sy = preview.width / pil_img.width, preview.height / pil_img.height
@@ -235,13 +271,23 @@ def draw_detected_outline(pil_img: Image.Image, quad=None, percentage_corners=No
         quad = np.array([[x * pil_img.width / 100, y * pil_img.height / 100]
                          for x, y in percentage_corners], np.float32)
     if quad is not None:
-        poly = [(int(x * sx), int(y * sy)) for x, y in _order_quad(quad)]
         painter = ImageDraw.Draw(preview)
+        if safety_margin_pct > 0:
+            try:
+                expanded = expand_quad_perspective(quad, safety_margin_pct)
+                orange = [(round(float(x) * sx), round(float(y) * sy)) for x, y in expanded]
+                painter.line(orange + [orange[0]], fill=(255, 157, 0),
+                             width=max(3, preview.width // 165))
+            except cv2.error:
+                pass
+        poly = [(int(x * sx), int(y * sy)) for x, y in _order_quad(quad)]
         painter.line(poly + [poly[0]], fill=(0, 230, 95), width=max(3, preview.width // 180))
         for idx, (x, y) in enumerate(poly):
             r = max(6, preview.width // 75)
-            painter.ellipse((x - r, y - r, x + r, y + r), fill=(255, 180, 30), outline=(0, 0, 0), width=2)
-            painter.text((x + r + 3, y - r - 3), str(idx + 1), fill=(0, 0, 0), stroke_width=2, stroke_fill=(255,255,255))
+            painter.ellipse((x - r, y - r, x + r, y + r), fill=(255, 180, 30),
+                            outline=(0, 0, 0), width=2)
+            painter.text((x + r + 3, y - r - 3), str(idx + 1), fill=(0, 0, 0),
+                         stroke_width=2, stroke_fill=(255,255,255))
     return preview
 
 
@@ -454,7 +500,7 @@ def main():
         </style>
         ''', unsafe_allow_html=True)
     st.title('🪪 Xử lý CCCD / GPLX & in A4')
-    st.caption('Crop 4 góc + nắn phối cảnh • 3 bộ/trang A4 mặc định • PDF/Word/PNG • Xử lý trong ứng dụng, không dùng API OCR')
+    st.caption('Cắt không xém mép (viền an toàn điều chỉnh được) • nắn 4 góc • 3 bộ/trang A4 • PDF/Word/PNG')
 
     if 'upload_cycle' not in st.session_state:
         st.session_state.upload_cycle = 0
@@ -464,8 +510,10 @@ def main():
     @st.cache_data(show_spinner=False, max_entries=128)
     def cached_auto(image_bytes: bytes, angle: int):
         original = rotate_image(read_image(image_bytes), angle)
-        cropped, quad, confidence = auto_crop(original)
-        return cropped, quad, confidence
+        candidates = detect_card_candidates(original)
+        if not candidates:
+            return None, 0.0
+        return candidates[0]
 
     tab_layout, tab_vneid = st.tabs(['🖨️ Dàn trang CCCD / GPLX', '📱 Crop 2 mặt từ VNeID'])
     with tab_layout:
@@ -481,20 +529,20 @@ def main():
             files = st.file_uploader('Tải ảnh theo thứ tự: trước 1, sau 1, trước 2, sau 2, ...',
                                      type=['jpg','jpeg','png','webp'], accept_multiple_files=True,
                                      key=f'files_{st.session_state.upload_cycle}')
-            st.caption('Mỗi 2 ảnh kế tiếp = 1 bộ. Nếu thiếu mặt sau, hệ thống để trống mặt đó.')
+            st.caption('Mỗi 2 ảnh kế tiếp = 1 bộ. Nếu thiếu mặt sau, hệ thống để trống mặt đó. Ảnh gốc đã chụp thiếu mép thì không thể phục hồi bằng mở rộng crop.')
         with c2:
-            st.info('**Chuẩn in:** khổ A4 đứng (210 × 297 mm). Mỗi CCCD/GPLX được đặt trong khung 85,6 × 54 mm, không kéo méo tỷ lệ. PDF phù hợp để nộp/in; Word có thể chỉnh từng ảnh.')
+            st.info('**Chuẩn in:** A4 đứng (210 × 297 mm), mỗi ảnh nằm trong khung 85,6 × 54 mm và không bị kéo méo. Khi bật viền an toàn, phần thẻ hiển thị nhỏ hơn đôi chút trong khung để giữ trọn cạnh; cần in đúng kích thước vật lý 1:1 thì chọn viền 0% sau khi đã chỉnh 4 góc chính xác.')
 
         if files:
             st.subheader('1. Kiểm tra ảnh đã cắt')
-            st.caption('Các ảnh cắt không chắc chắn sẽ mở phần chỉnh sửa. Chọn "Chỉnh 4 góc" nếu nền phức tạp hoặc thẻ bị nghiêng.')
+            st.caption('Viền XANH = mép tự động tìm. Viền CAM = mép được lấy thêm để KHÔNG xém góc thẻ. Hãy xem ảnh kết quả trước khi xuất.')
             processed = []
             for idx, uploaded in enumerate(files):
                 data = uploaded.getvalue()
                 file_key = f'{st.session_state.upload_cycle}_{idx}_{hashlib.md5(data).hexdigest()[:10]}'
                 angle = st.session_state.get('rotation_' + file_key, 0)
                 raw = rotate_image(read_image(data), angle)
-                cropped_auto, quad, confidence = cached_auto(data, angle)
+                quad, confidence = cached_auto(data, angle)
                 verified = quad is not None and confidence >= 0.73
                 status = '✅ Đã tìm khung' if verified else ('⚠️ Cần kiểm tra khung' if quad is not None else '⚠️ Không tìm thấy viền thẻ')
                 with st.expander(f'Ảnh {idx + 1} · {uploaded.name} · {status}', expanded=not verified):
@@ -507,16 +555,32 @@ def main():
                         choice = st.selectbox('Chế độ cắt',
                             ['Tự động (4 góc)', 'Cắt khung chữ nhật (%)', 'Chỉnh 4 góc (%)', 'Giữ nguyên ảnh'],
                             key='mode_' + file_key)
-                        result = cropped_auto
+                        margin_pct = st.slider(
+                            '🛡️ Chừa viền an toàn quanh CCCD (%)',
+                            min_value=0.0, max_value=12.0, value=4.0, step=0.5,
+                            key='safe_margin_' + file_key,
+                            help='Mặc định 4%. Nếu vẫn xém cạnh: tăng lên 5–8%. Nếu nền thừa nhiều: giảm xuống 2–3%.'
+                        )
+                        result = crop_quad(raw, quad, safety_margin_pct=margin_pct) if quad is not None else raw.copy()
                         drawn_points = quad
+                        preview_margin = margin_pct
+                        if margin_pct > 0:
+                            st.caption('Viền cam là vùng crop mở rộng. Viền an toàn sẽ giữ thêm một ít nền xung quanh thẻ.')
                         if choice == 'Giữ nguyên ảnh':
                             result = raw.copy()
                             drawn_points = None
+                            preview_margin = 0.0
                         elif choice == 'Cắt khung chữ nhật (%)':
-                            x_default = (max(0, int(quad[:,0].min() / raw.width * 100)),
-                                         min(100, int(quad[:,0].max() / raw.width * 100))) if quad is not None else (5,95)
-                            y_default = (max(0, int(quad[:,1].min() / raw.height * 100)),
-                                         min(100, int(quad[:,1].max() / raw.height * 100))) if quad is not None else (5,95)
+                            # Mặc định chừa một khoảng thừa quanh khung; người dùng kéo tay nếu muốn.
+                            x_default = (
+                                max(0, int(math.floor((quad[:,0].min() - (quad[:,0].max() - quad[:,0].min()) * margin_pct/100) / raw.width * 100))),
+                                min(100, int(math.ceil((quad[:,0].max() + (quad[:,0].max() - quad[:,0].min()) * margin_pct/100) / raw.width * 100)))
+                            ) if quad is not None else (4,96)
+                            y_default = (
+                                max(0, int(math.floor((quad[:,1].min() - (quad[:,1].max() - quad[:,1].min()) * margin_pct/100) / raw.height * 100))),
+                                min(100, int(math.ceil((quad[:,1].max() + (quad[:,1].max() - quad[:,1].min()) * margin_pct/100) / raw.height * 100)))
+                            ) if quad is not None else (4,96)
+                            preview_margin = 0.0  # Khung chữ nhật đã là vùng cuối cùng, không nới thêm.
                             if x_default[0] >= x_default[1]: x_default = (5,95)
                             if y_default[0] >= y_default[1]: y_default = (5,95)
                             xv = st.slider('X trái ↔ phải (%)', 0, 100, x_default, key='x_' + file_key)
@@ -545,18 +609,19 @@ def main():
                                                    float(p['Y (%)']) * raw.height / 100] for p in changed])
                                 if cv2.contourArea(_order_quad(pts)) < raw.width * raw.height * 0.001:
                                     raise ValueError('Bốn góc không tạo thành vùng cắt hợp lệ.')
-                                result = crop_quad(raw, pts)
+                                result = crop_quad(raw, pts, safety_margin_pct=margin_pct)
                                 drawn_points = pts
                             except (ValueError, TypeError, KeyError) as exc:
                                 st.error(f'Tọa độ chưa hợp lệ: {exc}')
                         elif quad is None:
-                            st.warning('Chưa xác định được khung. Hãy chọn Cắt khung chữ nhật hoặc Chỉnh 4 góc để loại bỏ nền.')
+                            st.warning('Chưa xác định được khung. Ảnh gốc được GIỮ NGUYÊN để tránh mất dữ liệu. Hãy chọn Cắt khung chữ nhật hoặc Chỉnh 4 góc để loại bỏ nền.')
                         else:
                             st.caption(f'Chỉ số hình học của vùng đã nhận dạng: {confidence:.0%}. Cần xem lại nếu viền xanh không khớp mép thẻ.')
                     with col_preview:
                         pic1, pic2 = st.columns(2)
                         with pic1:
-                            st.image(draw_detected_outline(raw, drawn_points), caption='Ảnh gốc / viền nhận dạng', use_container_width=True)
+                            st.image(draw_detected_outline(raw, drawn_points, safety_margin_pct=preview_margin),
+                                     caption='Xanh: khung phát hiện · Cam: viền an toàn', use_container_width=True)
                         with pic2:
                             st.image(result, caption='Kết quả crop', use_container_width=True)
                     processed.append(result)
