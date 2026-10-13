@@ -192,56 +192,7 @@ def detect_card_candidates(pil_img: Image.Image, max_candidates: int = 10):
     return [(quad, confidence) for quad, confidence, _ in dedup]
 
 
-def trim_dark_blue_matte(pil_img: Image.Image, output_width: int = 1280) -> Image.Image:
-    """Bỏ viền nền xanh đậm *đều màu* bọc ngoài thẻ sau khi đã nắn phối cảnh.
-
-    Chỉ tác động nếu >= 3 cạnh có dải xanh đặc trưng liên tục gần biên.
-    Không làm thay đổi màu/thông tin của phần ruột CCCD, không tô bù pixel.
-    Nếu không tự tin nhận dạng được nền: giữ nguyên ảnh để tránh cắt xém.
-    """
-    rgb = np.asarray(pil_img.convert('RGB'))
-    h, w = rgb.shape[:2]
-    if h < 80 or w < 120:
-        return pil_img
-    r, g, b = (rgb[:, :, i].astype(np.int16) for i in range(3))
-    # Xanh cobalt/navy: nền xanh đậm bên ngoài; không tính hoa văn cyan trên CCCD.
-    blue = ((b > r * 1.22) & (b > g * 1.23) & (b >= 85)
-            & (r < 135) & (g < 155))
-    iy1, iy2 = int(h * 0.17), int(h * 0.83)
-    ix1, ix2 = int(w * 0.17), int(w * 0.83)
-    max_x, max_y = max(2, int(w * 0.075)), max(2, int(h * 0.075))
-    traces = [
-        blue[iy1:iy2, :max_x].mean(axis=0),
-        blue[iy1:iy2, -max_x:].mean(axis=0)[::-1],
-        blue[:max_y, ix1:ix2].mean(axis=1),
-        blue[-max_y:, ix1:ix2].mean(axis=1)[::-1],
-    ]
-    trims = []
-    for trace in traces:
-        strong = np.flatnonzero(trace >= 0.56)
-        if not len(strong) or strong[0] > max(2, int(len(trace) * 0.48)):
-            trims.append(0)
-            continue
-        # Viền xanh phải kéo dài từ vùng ngoài hướng vào trong; cho phép 1-2px ảnh nén.
-        last = int(strong[0])
-        for at in strong[1:]:
-            if at - last > max(2, int(len(trace) * 0.04)):
-                break
-            last = int(at)
-        trims.append(min(len(trace), last + 2))
-    if sum(v > 0 for v in trims) < 3:
-        return pil_img
-    left, right, top, bottom = trims
-    # Không ép bỏ viền quá lớn, có thể đó là một phần thật của giấy tờ.
-    if any(v > limit for v, limit in zip(trims, (w * .065, w * .065, h * .065, h * .065))):
-        return pil_img
-    cropped = pil_img.crop((left, top, w - right, h - bottom))
-    # Sau khi xác định chính xác mép thẻ, mọi mặt đều có kích thước đầu ra giống nhau.
-    height = round(output_width / CARD_ASPECT)
-    return cropped.resize((output_width, height), Image.Resampling.LANCZOS)
-
-
-def expand_quad_perspective(points, safety_margin_pct: float = 0.7) -> np.ndarray:
+def expand_quad_perspective(points, safety_margin_pct: float = 4.0) -> np.ndarray:
     """Nới khung crop theo bốn cạnh của thẻ, kể cả ảnh chụp méo phối cảnh.
 
     Khung xanh là biên phát hiện; khung cam là vùng lấy thêm xung quanh.
@@ -259,10 +210,9 @@ def crop_quad(
     pil_img: Image.Image,
     points,
     output_width: int = 1280,
-    safety_margin_pct: float = 0.7,
-    clean_blue_edge: bool = True,
+    safety_margin_pct: float = 4.0,
 ) -> Image.Image:
-    """Nắn phối cảnh của thẻ với biên an toàn nhỏ (0.7% mặc định).
+    """Nắn thẻ kèm biên an toàn (4% mặc định, điều chỉnh được trên Web).
 
     Điểm phát hiện được chiếu vào bên TRONG ảnh kết quả, nhờ đó không cắt
     xém mất mép. Dùng nền trắng cho phần vượt khỏi ảnh gốc, tuyệt đối không
@@ -290,11 +240,10 @@ def crop_quad(
                                  borderValue=(255, 255, 255))
     if not landscape:
         warped = cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
-    result = Image.fromarray(warped)
-    return trim_dark_blue_matte(result, output_width) if clean_blue_edge else result
+    return Image.fromarray(warped)
 
 
-def auto_crop(pil_img: Image.Image, safety_margin_pct: float = 0.7):
+def auto_crop(pil_img: Image.Image, safety_margin_pct: float = 4.0):
     matches = detect_card_candidates(pil_img)
     if not matches:
         return pil_img.copy(), None, 0.0
@@ -343,14 +292,10 @@ def draw_detected_outline(pil_img: Image.Image, quad=None, percentage_corners=No
 
 
 def fit_into_card(pil_img: Image.Image, size_px: tuple[int, int]) -> Image.Image:
-    """Với ảnh được nắn: khít thẻ. Ảnh gốc không đúng tỷ lệ: không cắt nội dung."""
-    img = pil_img.convert('RGB')
-    aspect = img.width / max(1, img.height)
-    if abs(aspect / CARD_ASPECT - 1) < .012:
-        return img.resize(size_px, Image.Resampling.LANCZOS)
-    card = Image.new('RGB', size_px, 'white')
-    inside = ImageOps.contain(img, size_px, Image.Resampling.LANCZOS)
-    card.paste(inside, ((size_px[0] - inside.width) // 2, (size_px[1] - inside.height) // 2))
+    """Không ép méo ảnh; dùng viền trắng nếu crop thủ công chưa đúng tỷ lệ."""
+    card = Image.new("RGB", size_px, "white")
+    shrunk = ImageOps.contain(pil_img.convert("RGB"), size_px, Image.Resampling.LANCZOS)
+    card.paste(shrunk, ((size_px[0] - shrunk.width) // 2, (size_px[1] - shrunk.height) // 2))
     return card
 
 
@@ -416,8 +361,8 @@ def create_multi_docx(card_pairs, pairs_per_page: int = 3) -> io.BytesIO:
     doc = Document()
     sec = doc.sections[0]
     sec.page_width, sec.page_height = Mm(210), Mm(297)
-    sec.left_margin, sec.right_margin = Mm(7.4), Mm(7.4)
-    gap_y_mm = {1: 0.0, 2: 30.0, 3: 19.0, 4: 11.5}[pairs_per_page]
+    sec.left_margin, sec.right_margin = Mm(12), Mm(12)
+    gap_y_mm = {2: 30.0, 3: 19.0, 4: 11.5}[pairs_per_page]
     total_h_mm = pairs_per_page * CARD_MM[1] + (pairs_per_page - 1) * gap_y_mm
     sec.top_margin, sec.bottom_margin = Mm((A4_MM[1] - total_h_mm) / 2), Mm(12)
     doc.styles['Normal'].paragraph_format.space_after = Pt(0)
@@ -433,8 +378,8 @@ def create_multi_docx(card_pairs, pairs_per_page: int = 3) -> io.BytesIO:
         table = doc.add_table(rows=2 * len(subset) - 1, cols=2)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         table.autofit = False
-        table.columns[0].width = Mm(97.6)
-        table.columns[1].width = Mm(97.6)
+        table.columns[0].width = Mm(92)
+        table.columns[1].width = Mm(92)
         for row_i, row in enumerate(table.rows):
             row.height = Mm(CARD_MM[1] if row_i % 2 == 0 else gap_y_mm)
             row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
@@ -442,7 +387,7 @@ def create_multi_docx(card_pairs, pairs_per_page: int = 3) -> io.BytesIO:
             no_split = OxmlElement('w:cantSplit')
             tr_pr.append(no_split)
             for col_idx, cell in enumerate(row.cells):
-                cell.width = Mm(97.6)
+                cell.width = Mm(92)
                 cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
                 _apply_cell_margins_zero(cell)
                 _set_cell_border_none(cell)
@@ -555,7 +500,7 @@ def main():
         </style>
         ''', unsafe_allow_html=True)
     st.title('🪪 Xử lý CCCD / GPLX & in A4')
-    st.caption('Cắt sát mép, nắn thẳng phối cảnh 4 góc, làm sạch nền xanh đậm • 3 bộ/trang A4 • PDF/Word/PNG')
+    st.caption('Cắt không xém mép (viền an toàn điều chỉnh được) • nắn 4 góc • 3 bộ/trang A4 • PDF/Word/PNG')
 
     if 'upload_cycle' not in st.session_state:
         st.session_state.upload_cycle = 0
@@ -584,13 +529,13 @@ def main():
             files = st.file_uploader('Tải ảnh theo thứ tự: trước 1, sau 1, trước 2, sau 2, ...',
                                      type=['jpg','jpeg','png','webp'], accept_multiple_files=True,
                                      key=f'files_{st.session_state.upload_cycle}')
-            st.caption('Mỗi 2 ảnh liên tiếp là 1 bộ. Nếu mặt bị nghiêng/méo, chọn «Chỉnh 4 góc (%)» để nắn thẳng. Ảnh gốc thiếu mép thì không thể phục hồi bằng crop.')
+            st.caption('Mỗi 2 ảnh kế tiếp = 1 bộ. Nếu thiếu mặt sau, hệ thống để trống mặt đó. Ảnh gốc đã chụp thiếu mép thì không thể phục hồi bằng mở rộng crop.')
         with c2:
-            st.info('**Chuẩn in:** A4 đứng, mỗi mặt 85,6 × 54 mm. Hai mặt cùng hàng và cùng cỡ. Ảnh đã nắn 4 góc sẽ lấp đầy khung; nếu sai mép, chỉnh 4 góc rồi xuất lại.')
+            st.info('**Chuẩn in:** A4 đứng (210 × 297 mm), mỗi ảnh nằm trong khung 85,6 × 54 mm và không bị kéo méo. Khi bật viền an toàn, phần thẻ hiển thị nhỏ hơn đôi chút trong khung để giữ trọn cạnh; cần in đúng kích thước vật lý 1:1 thì chọn viền 0% sau khi đã chỉnh 4 góc chính xác.')
 
         if files:
             st.subheader('1. Kiểm tra ảnh đã cắt')
-            st.caption('Viền XANH = biên tìm được, viền CAM = biên dự phòng. Kiểm tra đủ cả 4 cạnh giấy tờ trước khi tải.')
+            st.caption('Viền XANH = mép tự động tìm. Viền CAM = mép được lấy thêm để KHÔNG xém góc thẻ. Hãy xem ảnh kết quả trước khi xuất.')
             processed = []
             for idx, uploaded in enumerate(files):
                 data = uploaded.getvalue()
@@ -611,20 +556,16 @@ def main():
                             ['Tự động (4 góc)', 'Cắt khung chữ nhật (%)', 'Chỉnh 4 góc (%)', 'Giữ nguyên ảnh'],
                             key='mode_' + file_key)
                         margin_pct = st.slider(
-                            '🛡️ Biên an toàn khi nhận dạng (%)',
-                            min_value=0.0, max_value=6.0, value=0.7, step=0.1,
+                            '🛡️ Chừa viền an toàn quanh CCCD (%)',
+                            min_value=0.0, max_value=12.0, value=4.0, step=0.5,
                             key='safe_margin_' + file_key,
-                            help='Mặc định 0,7% để tránh xém nhưng không thừa nền. Nếu ảnh có dấu hiệu mất mép, tăng 1–2%. Nếu thừa nền, giảm về 0%.'
+                            help='Mặc định 4%. Nếu vẫn xém cạnh: tăng lên 5–8%. Nếu nền thừa nhiều: giảm xuống 2–3%.'
                         )
-                        clean_blue = st.checkbox('Tự loại bỏ viền nền xanh đậm bên ngoài thẻ (nếu có)',
-                                                 value=True, key='clean_blue_' + file_key,
-                                                 help='Chỉ crop dải nền xanh đậm khi thấy viền rõ ở ít nhất 3 cạnh; không đổi màu ảnh CCCD.')
-                        result = (crop_quad(raw, quad, safety_margin_pct=margin_pct,
-                                            clean_blue_edge=clean_blue) if quad is not None else raw.copy())
+                        result = crop_quad(raw, quad, safety_margin_pct=margin_pct) if quad is not None else raw.copy()
                         drawn_points = quad
                         preview_margin = margin_pct
                         if margin_pct > 0:
-                            st.caption('Viền cam là biên chống xém tạm thời, sau đó có thể tự loại viền xanh đậm để dàn trang sát mép.')
+                            st.caption('Viền cam là vùng crop mở rộng. Viền an toàn sẽ giữ thêm một ít nền xung quanh thẻ.')
                         if choice == 'Giữ nguyên ảnh':
                             result = raw.copy()
                             drawn_points = None
@@ -645,12 +586,11 @@ def main():
                             xv = st.slider('X trái ↔ phải (%)', 0, 100, x_default, key='x_' + file_key)
                             yv = st.slider('Y trên ↕ dưới (%)', 0, 100, y_default, key='y_' + file_key)
                             try:
+                                result = crop_rectangle(raw, xv[0], yv[0], xv[1], yv[1])
                                 drawn_points = np.float32([[xv[0]*raw.width/100, yv[0]*raw.height/100],
                                     [xv[1]*raw.width/100, yv[0]*raw.height/100],
                                     [xv[1]*raw.width/100, yv[1]*raw.height/100],
                                     [xv[0]*raw.width/100, yv[1]*raw.height/100]])
-                                result = crop_quad(raw, drawn_points, safety_margin_pct=0,
-                                                   clean_blue_edge=clean_blue)
                             except ValueError as exc:
                                 st.error(str(exc))
                         elif choice == 'Chỉnh 4 góc (%)':
@@ -669,8 +609,7 @@ def main():
                                                    float(p['Y (%)']) * raw.height / 100] for p in changed])
                                 if cv2.contourArea(_order_quad(pts)) < raw.width * raw.height * 0.001:
                                     raise ValueError('Bốn góc không tạo thành vùng cắt hợp lệ.')
-                                result = crop_quad(raw, pts, safety_margin_pct=margin_pct,
-                                                   clean_blue_edge=clean_blue)
+                                result = crop_quad(raw, pts, safety_margin_pct=margin_pct)
                                 drawn_points = pts
                             except (ValueError, TypeError, KeyError) as exc:
                                 st.error(f'Tọa độ chưa hợp lệ: {exc}')
