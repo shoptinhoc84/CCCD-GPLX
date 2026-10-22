@@ -130,18 +130,14 @@ def add_card_row_to_word(doc, pil_front, pil_back):
   p_b.alignment = WD_ALIGN_PARAGRAPH.CENTER
   p_b.add_run().add_picture(buf_back, width=Inches(3.0))
 
-  # Thêm đường viền nét đứt xung quanh mỗi bảng thẻ trong Word để dễ cắt
+  # Thêm đường viền nét đứt ở dưới đáy mỗi bộ thẻ trong file Word để dễ cắt
   for cell in (cell_f, cell_b):
     tcPr = cell._tc.get_or_add_tcPr()
-    borders = parse_xml(
-        r'<w:tcBorders %s>'
-        r'<w:top w:val="dashed" w:sz="6" w:space="0" w:color="888888"/>'
-        r'<w:left w:val="dashed" w:sz="6" w:space="0" w:color="888888"/>'
-        r'<w:bottom w:val="dashed" w:sz="6" w:space="0" w:color="888888"/>'
-        r'<w:right w:val="dashed" w:sz="6" w:space="0" w:color="888888"/>'
-        r"</w:tcBorders>" % nsdecls("w")
+    bottom_border = parse_xml(
+        r'<w:tcBorders %s><w:bottom w:val="dashed" w:sz="8" w:space="0"'
+        r' w:color="777777"/></w:tcBorders>' % nsdecls("w")
     )
-    tcPr.append(borders)
+    tcPr.append(bottom_border)
 
   p_space = doc.add_paragraph()
   p_space.paragraph_format.space_after = Pt(4)
@@ -209,24 +205,6 @@ def draw_dashed_line(
     )
 
 
-def draw_dashed_rect(
-    draw,
-    x1,
-    y1,
-    x2,
-    y2,
-    dash_length=10,
-    space_length=8,
-    fill="#888888",
-    width=2,
-):
-  """Vẽ khung hình chữ nhật nét đứt bao quanh từng bộ thẻ"""
-  draw_dashed_line(draw, x1, y1, x2, y1, dash_length, space_length, fill, width)  # Cạnh trên
-  draw_dashed_line(draw, x2, y1, x2, y2, dash_length, space_length, fill, width)  # Cạnh phải
-  draw_dashed_line(draw, x1, y2, x2, y2, dash_length, space_length, fill, width)  # Cạnh dưới
-  draw_dashed_line(draw, x1, y1, x1, y2, dash_length, space_length, fill, width)  # Cạnh trái
-
-
 def create_a4_canvas_horizontal(card_pairs_chunk):
   a4_w, a4_h = 1240, 1754
   canvas = Image.new("RGB", (a4_w, a4_h), "white")
@@ -254,21 +232,18 @@ def create_a4_canvas_horizontal(card_pairs_chunk):
     canvas.paste(f_resized, (start_x, y_pos))
     canvas.paste(b_resized, (start_x + card_w + spacing_x, y_pos))
 
-    # LUÔN VẼ KHUNG NÉT ĐỨT BAO QUANH CHO TỪNG BỘ (Dù chỉ có 1 bộ hay nhiều bộ)
+    # Vẽ 1 đường kẻ ngang nét đứt ngay bên dưới mỗi bộ thẻ (áp dụng cho cả 1 bộ)
     card_h = max(f_resized.height, b_resized.height)
-    box_left = start_x - 15
-    box_top = y_pos - 15
-    box_right = start_x + card_w * 2 + spacing_x + 15
-    box_bottom = y_pos + card_h + 15
+    line_y = y_pos + card_h + 20
 
-    draw_dashed_rect(
+    draw_dashed_line(
         draw,
-        box_left,
-        box_top,
-        box_right,
-        box_bottom,
-        dash_length=12,
-        space_length=8,
+        x1=100,
+        y1=line_y,
+        x2=a4_w - 100,
+        y2=line_y,
+        dash_length=15,
+        space_length=10,
         fill="#777777",
         width=2,
     )
