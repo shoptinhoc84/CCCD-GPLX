@@ -110,7 +110,7 @@ def crop_card_fast(image_np):
   return image_np
 
 
-def add_card_row_to_word(doc, pil_front, pil_back, is_last_row=False):
+def add_card_row_to_word(doc, pil_front, pil_back):
   table = doc.add_table(rows=1, cols=2)
   table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
@@ -130,19 +130,21 @@ def add_card_row_to_word(doc, pil_front, pil_back, is_last_row=False):
   p_b.alignment = WD_ALIGN_PARAGRAPH.CENTER
   p_b.add_run().add_picture(buf_back, width=Inches(3.0))
 
-  # Nếu không phải hàng cuối cùng trong trang, thêm đường viền dưới (bottom border) cho bảng để làm đường cắt
-  if not is_last_row:
-    for cell in (cell_f, cell_b):
-      tcPr = cell._tc.get_or_add_tcPr()
-      # Tạo đường viền nét đứt hoặc nét liền mảnh màu xám dưới đáy ô
-      bottom_border = parse_xml(
-          r'<w:tcBorders %s><w:bottom w:val="dashed" w:sz="6" w:space="0"'
-          r' w:color="CCCCCC"/></w:tcBorders>' % nsdecls("w")
-      )
-      tcPr.append(bottom_border)
+  # Thêm đường viền nét đứt xung quanh mỗi bảng thẻ trong Word để dễ cắt
+  for cell in (cell_f, cell_b):
+    tcPr = cell._tc.get_or_add_tcPr()
+    borders = parse_xml(
+        r'<w:tcBorders %s>'
+        r'<w:top w:val="dashed" w:sz="6" w:space="0" w:color="888888"/>'
+        r'<w:left w:val="dashed" w:sz="6" w:space="0" w:color="888888"/>'
+        r'<w:bottom w:val="dashed" w:sz="6" w:space="0" w:color="888888"/>'
+        r'<w:right w:val="dashed" w:sz="6" w:space="0" w:color="888888"/>'
+        r"</w:tcBorders>" % nsdecls("w")
+    )
+    tcPr.append(borders)
 
   p_space = doc.add_paragraph()
-  p_space.paragraph_format.space_after = Pt(2)
+  p_space.paragraph_format.space_after = Pt(4)
 
 
 def create_multi_docx(card_pairs):
@@ -153,16 +155,10 @@ def create_multi_docx(card_pairs):
     section.left_margin = Inches(0.5)
     section.right_margin = Inches(0.5)
 
-  total_pairs = len(card_pairs)
   for i, (pil_front, pil_back) in enumerate(card_pairs):
     if i > 0 and i % 4 == 0:
       doc.add_page_break()
-
-    # Kiểm tra xem bộ này có phải là bộ cuối cùng trong trang (hoặc cuối danh sách) không
-    # Để không vẽ đường cắt thừa ở đáy trang A4
-    is_last_in_page = (i % 4 == 3) or (i == total_pairs - 1)
-
-    add_card_row_to_word(doc, pil_front, pil_back, is_last_row=is_last_in_page)
+    add_card_row_to_word(doc, pil_front, pil_back)
 
   doc_io = io.BytesIO()
   doc.save(doc_io)
@@ -213,6 +209,24 @@ def draw_dashed_line(
     )
 
 
+def draw_dashed_rect(
+    draw,
+    x1,
+    y1,
+    x2,
+    y2,
+    dash_length=10,
+    space_length=8,
+    fill="#888888",
+    width=2,
+):
+  """Vẽ khung hình chữ nhật nét đứt bao quanh từng bộ thẻ"""
+  draw_dashed_line(draw, x1, y1, x2, y1, dash_length, space_length, fill, width)  # Cạnh trên
+  draw_dashed_line(draw, x2, y1, x2, y2, dash_length, space_length, fill, width)  # Cạnh phải
+  draw_dashed_line(draw, x1, y2, x2, y2, dash_length, space_length, fill, width)  # Cạnh dưới
+  draw_dashed_line(draw, x1, y1, x1, y2, dash_length, space_length, fill, width)  # Cạnh trái
+
+
 def create_a4_canvas_horizontal(card_pairs_chunk):
   a4_w, a4_h = 1240, 1754
   canvas = Image.new("RGB", (a4_w, a4_h), "white")
@@ -222,7 +236,6 @@ def create_a4_canvas_horizontal(card_pairs_chunk):
   start_x = (a4_w - (card_w * 2 + spacing_x)) // 2
 
   y_positions = [100, 500, 900, 1300]
-  row_heights = []
 
   for idx, (pil_front, pil_back) in enumerate(card_pairs_chunk):
     if idx >= 4:
@@ -241,22 +254,22 @@ def create_a4_canvas_horizontal(card_pairs_chunk):
     canvas.paste(f_resized, (start_x, y_pos))
     canvas.paste(b_resized, (start_x + card_w + spacing_x, y_pos))
 
-    row_heights.append((y_pos, max(f_resized.height, b_resized.height)))
+    # LUÔN VẼ KHUNG NÉT ĐỨT BAO QUANH CHO TỪNG BỘ (Dù chỉ có 1 bộ hay nhiều bộ)
+    card_h = max(f_resized.height, b_resized.height)
+    box_left = start_x - 15
+    box_top = y_pos - 15
+    box_right = start_x + card_w * 2 + spacing_x + 15
+    box_bottom = y_pos + card_h + 15
 
-  for i in range(len(row_heights) - 1):
-    current_bottom = row_heights[i][0] + row_heights[i][1]
-    next_top = row_heights[i + 1][0]
-    mid_y = (current_bottom + next_top) // 2
-
-    draw_dashed_line(
+    draw_dashed_rect(
         draw,
-        x1=100,
-        y1=mid_y,
-        x2=a4_w - 100,
-        y2=mid_y,
-        dash_length=15,
-        space_length=10,
-        fill="#A0A0A0",
+        box_left,
+        box_top,
+        box_right,
+        box_bottom,
+        dash_length=12,
+        space_length=8,
+        fill="#777777",
         width=2,
     )
 
