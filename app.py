@@ -141,12 +141,12 @@ def add_card_row_to_word(doc, pil_front, pil_back):
   cell_f = table.cell(0, 0)
   p_f = cell_f.paragraphs[0]
   p_f.alignment = WD_ALIGN_PARAGRAPH.CENTER
-  p_f.add_run().add_picture(buf_front, width=Inches(3.15))
+  p_f.add_run().add_picture(buf_front, width=Inches(3.35))
 
   cell_b = table.cell(0, 1)
   p_b = cell_b.paragraphs[0]
   p_b.alignment = WD_ALIGN_PARAGRAPH.CENTER
-  p_b.add_run().add_picture(buf_back, width=Inches(3.15))
+  p_b.add_run().add_picture(buf_back, width=Inches(3.35))
 
   # Thêm đường viền nét đứt ở dưới đáy mỗi bộ thẻ trong file Word để dễ cắt
   for cell in (cell_f, cell_b):
@@ -228,7 +228,7 @@ def create_a4_canvas_horizontal(card_pairs_chunk):
   canvas = Image.new("RGB", (a4_w, a4_h), "white")
   draw = ImageDraw.Draw(canvas)
 
-  card_w, spacing_x = 520, 24
+  card_w, spacing_x = 540, 16
   start_x = (a4_w - (card_w * 2 + spacing_x)) // 2
 
   y_positions = [100, 500, 900, 1300]
@@ -242,12 +242,12 @@ def create_a4_canvas_horizontal(card_pairs_chunk):
       continue
     if pil_back.width <= 0 or pil_back.height <= 0:
       continue
-    ratio_f = min(card_w / pil_front.width, 370 / pil_front.height)
+    ratio_f = min(card_w / pil_front.width, 390 / pil_front.height)
     f_resized = pil_front.resize(
         (max(1, int(pil_front.width * ratio_f)), max(1, int(pil_front.height * ratio_f))),
         Image.Resampling.LANCZOS
     )
-    ratio_b = min(card_w / pil_back.width, 370 / pil_back.height)
+    ratio_b = min(card_w / pil_back.width, 390 / pil_back.height)
     b_resized = pil_back.resize(
         (max(1, int(pil_back.width * ratio_b)), max(1, int(pil_back.height * ratio_b))),
         Image.Resampling.LANCZOS
