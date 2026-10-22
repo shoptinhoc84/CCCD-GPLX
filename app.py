@@ -5,6 +5,8 @@ import cv2
 import docx
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls
 from docx.shared import Inches, Pt
 import numpy as np
 from PIL import Image, ImageDraw
@@ -108,7 +110,7 @@ def crop_card_fast(image_np):
   return image_np
 
 
-def add_card_row_to_word(doc, pil_front, pil_back):
+def add_card_row_to_word(doc, pil_front, pil_back, is_last_row=False):
   table = doc.add_table(rows=1, cols=2)
   table.alignment = WD_TABLE_ALIGNMENT.CENTER
 
@@ -128,6 +130,17 @@ def add_card_row_to_word(doc, pil_front, pil_back):
   p_b.alignment = WD_ALIGN_PARAGRAPH.CENTER
   p_b.add_run().add_picture(buf_back, width=Inches(3.0))
 
+  # Nếu không phải hàng cuối cùng trong trang, thêm đường viền dưới (bottom border) cho bảng để làm đường cắt
+  if not is_last_row:
+    for cell in (cell_f, cell_b):
+      tcPr = cell._tc.get_or_add_tcPr()
+      # Tạo đường viền nét đứt hoặc nét liền mảnh màu xám dưới đáy ô
+      bottom_border = parse_xml(
+          r'<w:tcBorders %s><w:bottom w:val="dashed" w:sz="6" w:space="0"'
+          r' w:color="CCCCCC"/></w:tcBorders>' % nsdecls("w")
+      )
+      tcPr.append(bottom_border)
+
   p_space = doc.add_paragraph()
   p_space.paragraph_format.space_after = Pt(2)
 
@@ -140,10 +153,16 @@ def create_multi_docx(card_pairs):
     section.left_margin = Inches(0.5)
     section.right_margin = Inches(0.5)
 
+  total_pairs = len(card_pairs)
   for i, (pil_front, pil_back) in enumerate(card_pairs):
     if i > 0 and i % 4 == 0:
       doc.add_page_break()
-    add_card_row_to_word(doc, pil_front, pil_back)
+
+    # Kiểm tra xem bộ này có phải là bộ cuối cùng trong trang (hoặc cuối danh sách) không
+    # Để không vẽ đường cắt thừa ở đáy trang A4
+    is_last_in_page = (i % 4 == 3) or (i == total_pairs - 1)
+
+    add_card_row_to_word(doc, pil_front, pil_back, is_last_row=is_last_in_page)
 
   doc_io = io.BytesIO()
   doc.save(doc_io)
@@ -176,7 +195,6 @@ def create_single_cropped_docx(pil_cropped_img):
 def draw_dashed_line(
     draw, x1, y1, x2, y2, dash_length=10, space_length=8, fill="gray", width=2
 ):
-  """Hẽ đường kẻ nét đứt để hỗ trợ cắt giấy dễ dàng"""
   dx = x2 - x1
   dy = y2 - y1
   distance = max(abs(dx), abs(dy))
@@ -223,16 +241,13 @@ def create_a4_canvas_horizontal(card_pairs_chunk):
     canvas.paste(f_resized, (start_x, y_pos))
     canvas.paste(b_resized, (start_x + card_w + spacing_x, y_pos))
 
-    # Lưu lại kích thước để vẽ đường cắt ngang dưới mỗi bộ thẻ
     row_heights.append((y_pos, max(f_resized.height, b_resized.height)))
 
-  # Vẽ các đường kẻ cắt ngang nằm giữa các bộ thẻ (giúp người dùng dễ căn chỉnh kéo cắt)
   for i in range(len(row_heights) - 1):
     current_bottom = row_heights[i][0] + row_heights[i][1]
     next_top = row_heights[i + 1][0]
     mid_y = (current_bottom + next_top) // 2
 
-    # Vẽ đường nét đứt màu xám nhạt ở giữa khoảng trống
     draw_dashed_line(
         draw,
         x1=100,
