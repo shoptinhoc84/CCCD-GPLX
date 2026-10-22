@@ -9,7 +9,7 @@ from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls
 from docx.shared import Inches, Pt
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 import streamlit as st
 
 # ---------------------------------------------------------
@@ -74,16 +74,32 @@ def toggle_swap_pair(pair_index):
 # THUẬT TOÁN XỬ LÝ ẢNH CHUNG
 # ---------------------------------------------------------
 def optimize_image_size(pil_img, max_dim=1600):
+  if pil_img.mode != "RGB":
+    pil_img = pil_img.convert("RGB")
   w, h = pil_img.size
+  if w <= 0 or h <= 0:
+    raise ValueError("Ảnh không hợp lệ hoặc có kích thước bằng 0.")
   if max(w, h) > max_dim:
     scale = max_dim / float(max(w, h))
-    return pil_img.resize(
-        (int(w * scale), int(h * scale)), Image.Resampling.LANCZOS
-    )
+    new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+    return pil_img.resize(new_size, Image.Resampling.LANCZOS)
   return pil_img
 
 
+@st.cache_data(show_spinner=False, max_entries=128)
+def _cached_crop_card(image_bytes):
+  try:
+    with Image.open(io.BytesIO(image_bytes)) as im:
+      im = ImageOps.exif_transpose(im).convert("RGB")
+      im = optimize_image_size(im)
+      cropped = crop_card_fast(np.asarray(im))
+      return Image.fromarray(cropped)
+  except Exception as exc:
+    raise ValueError(f"Không xử lý được ảnh: {exc}") from exc
+
 def crop_card_fast(image_np):
+  if image_np is None or image_np.size == 0 or image_np.ndim != 3 or image_np.shape[2] != 3:
+    raise ValueError("Không đọc được ảnh hoặc định dạng ảnh không hợp lệ.")
   h_img, w_img, _ = image_np.shape
   gray = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
   blur = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -95,7 +111,9 @@ def crop_card_fast(image_np):
     area = cv2.contourArea(cnt)
     if area > (w_img * h_img * 0.10):
       x, y, w, h = cv2.boundingRect(cnt)
-      aspect_ratio = float(w) / h
+      if h <= 0:
+        continue
+      aspect_ratio = float(w) / float(h)
       if 1.2 <= aspect_ratio <= 1.95 and (w < w_img * 0.98):
         if area > max_area:
           max_area = area
@@ -123,12 +141,12 @@ def add_card_row_to_word(doc, pil_front, pil_back):
   cell_f = table.cell(0, 0)
   p_f = cell_f.paragraphs[0]
   p_f.alignment = WD_ALIGN_PARAGRAPH.CENTER
-  p_f.add_run().add_picture(buf_front, width=Inches(3.0))
+  p_f.add_run().add_picture(buf_front, width=Inches(2.85))
 
   cell_b = table.cell(0, 1)
   p_b = cell_b.paragraphs[0]
   p_b.alignment = WD_ALIGN_PARAGRAPH.CENTER
-  p_b.add_run().add_picture(buf_back, width=Inches(3.0))
+  p_b.add_run().add_picture(buf_back, width=Inches(2.85))
 
   # Thêm đường viền nét đứt ở dưới đáy mỗi bộ thẻ trong file Word để dễ cắt
   for cell in (cell_f, cell_b):
@@ -220,13 +238,19 @@ def create_a4_canvas_horizontal(card_pairs_chunk):
       break
     y_pos = y_positions[idx]
 
-    ratio_f = card_w / pil_front.width
+    if pil_front.width <= 0 or pil_front.height <= 0:
+      continue
+    if pil_back.width <= 0 or pil_back.height <= 0:
+      continue
+    ratio_f = min(card_w / pil_front.width, 340 / pil_front.height)
     f_resized = pil_front.resize(
-        (card_w, int(pil_front.height * ratio_f)), Image.Resampling.LANCZOS
+        (max(1, int(pil_front.width * ratio_f)), max(1, int(pil_front.height * ratio_f))),
+        Image.Resampling.LANCZOS
     )
-    ratio_b = card_w / pil_back.width
+    ratio_b = min(card_w / pil_back.width, 340 / pil_back.height)
     b_resized = pil_back.resize(
-        (card_w, int(pil_back.height * ratio_b)), Image.Resampling.LANCZOS
+        (max(1, int(pil_back.width * ratio_b)), max(1, int(pil_back.height * ratio_b))),
+        Image.Resampling.LANCZOS
     )
 
     canvas.paste(f_resized, (start_x, y_pos))
@@ -255,7 +279,9 @@ def create_a4_canvas_horizontal(card_pairs_chunk):
 # THUẬT TOÁN CẮT KHUNG VNeID
 # ---------------------------------------------------------
 def crop_vneid_combined_block(pil_img):
-  img_np = np.array(pil_img)
+  img_np = np.asarray(pil_img.convert("RGB"))
+  if img_np.size == 0 or img_np.ndim != 3 or img_np.shape[2] != 3:
+    raise ValueError("Ảnh VNeID không hợp lệ hoặc không đọc được.")
   h_img, w_img, _ = img_np.shape
   gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
   blur = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -268,7 +294,9 @@ def crop_vneid_combined_block(pil_img):
     area = cv2.contourArea(cnt)
     if area > (w_img * h_img * 0.05):
       x, y, w, h = cv2.boundingRect(cnt)
-      aspect_ratio = float(w) / h
+      if h <= 0:
+        continue
+      aspect_ratio = float(w) / float(h)
       if 1.2 <= aspect_ratio <= 1.95 and w < w_img * 0.98:
         card_boxes.append((x, y, w, h))
 
@@ -351,17 +379,10 @@ with tab1:
         i1 = idx * 2
         i2 = i1 + 1
 
-        raw_img1 = Image.open(uploaded_files[i1]).convert("RGB")
-        opt_1 = optimize_image_size(raw_img1)
-        crop_1 = crop_card_fast(np.array(opt_1))
-        pil_f = Image.fromarray(crop_1)
+        pil_f = _cached_crop_card(uploaded_files[i1].getvalue())
 
         if i2 < num_files:
-          raw_img2 = Image.open(uploaded_files[i2]).convert("RGB")
-          opt_2 = optimize_image_size(raw_img2)
-          crop_2 = crop_card_fast(np.array(opt_2))
-          pil_b = Image.fromarray(crop_2)
-          del raw_img2, opt_2, crop_2
+          pil_b = _cached_crop_card(uploaded_files[i2].getvalue())
         else:
           pil_b = Image.new("RGB", pil_f.size, (255, 255, 255))
 
@@ -370,8 +391,8 @@ with tab1:
 
         card_pairs.append((pil_f, pil_b))
 
-        del raw_img1, opt_1, crop_1
-        gc.collect()
+        if (idx + 1) % 8 == 0:
+          gc.collect()
 
         progress_bar.progress((idx + 1) / num_pairs)
 
@@ -402,7 +423,8 @@ with tab1:
       )
 
       img_io = io.BytesIO()
-      a4_canvases[0].save(img_io, format="PNG", optimize=True)
+      if a4_canvases:
+        a4_canvases[0].save(img_io, format="PNG", optimize=True)
       img_io.seek(0)
 
       st.download_button(
@@ -458,7 +480,7 @@ with tab2:
         key="vneid_uploader",
     )
     if uploaded_vneid:
-      raw_vneid_img = Image.open(uploaded_vneid).convert("RGB")
+      raw_vneid_img = ImageOps.exif_transpose(Image.open(uploaded_vneid)).convert("RGB")
       st.image(
           raw_vneid_img, caption="Ảnh gốc VNeID", use_container_width=True
       )
