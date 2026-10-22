@@ -121,30 +121,29 @@ def add_card_row_to_word(doc, pil_front, pil_back):
   cell_f = table.cell(0, 0)
   p_f = cell_f.paragraphs[0]
   p_f.alignment = WD_ALIGN_PARAGRAPH.CENTER
-  p_f.add_run().add_picture(buf_front, width=Inches(3.2))
+  # Giảm kích thước ảnh xuống khoảng 3.0 inch để vừa khít 4 hàng trên 1 trang Word A4
+  p_f.add_run().add_picture(buf_front, width=Inches(3.0))
 
   cell_b = table.cell(0, 1)
   p_b = cell_b.paragraphs[0]
   p_b.alignment = WD_ALIGN_PARAGRAPH.CENTER
-  p_b.add_run().add_picture(buf_back, width=Inches(3.2))
+  p_b.add_run().add_picture(buf_back, width=Inches(3.0))
 
   p_space = doc.add_paragraph()
-  p_space.paragraph_format.space_after = Pt(
-      6
-  )  # Giảm khoảng cách để vừa 3 bộ trong 1 trang
+  p_space.paragraph_format.space_after = Pt(2)  # Khoảng cách tối ưu cho 4 bộ
 
 
 def create_multi_docx(card_pairs):
   doc = docx.Document()
   for section in doc.sections:
-    section.top_margin = Inches(0.3)
-    section.bottom_margin = Inches(0.3)
+    section.top_margin = Inches(0.25)
+    section.bottom_margin = Inches(0.25)
     section.left_margin = Inches(0.5)
     section.right_margin = Inches(0.5)
 
   for i, (pil_front, pil_back) in enumerate(card_pairs):
-    # Cứ đúng 3 bộ mới ngắt trang Word (thay vì 2 bộ như cũ)
-    if i > 0 and i % 3 == 0:
+    # Cứ đúng 4 bộ mới ngắt trang Word
+    if i > 0 and i % 4 == 0:
       doc.add_page_break()
     add_card_row_to_word(doc, pil_front, pil_back)
 
@@ -179,14 +178,17 @@ def create_single_cropped_docx(pil_cropped_img):
 def create_a4_canvas_horizontal(card_pairs_chunk):
   a4_w, a4_h = 1240, 1754
   canvas = Image.new("RGB", (a4_w, a4_h), "white")
-  card_w, spacing_x = 520, 40
+  card_w, spacing_x = (
+      480,
+      40,
+  )  # Thu nhỏ bề ngang thẻ để vừa 4 hàng dọc cân đối trên A4
   start_x = (a4_w - (card_w * 2 + spacing_x)) // 2
 
-  # Định nghĩa tọa độ Y cho ĐÚNG 3 bộ thẻ trên 1 trang A4
-  y_positions = [120, 630, 1140]
+  # Tọa độ Y cho ĐÚNG 4 bộ thẻ (8 mặt) trên 1 trang A4
+  y_positions = [100, 500, 900, 1300]
 
   for idx, (pil_front, pil_back) in enumerate(card_pairs_chunk):
-    if idx >= 3:
+    if idx >= 4:
       break
     y_pos = y_positions[idx]
 
@@ -332,9 +334,9 @@ with tab1:
       status_text.empty()
       progress_bar.empty()
 
-    # Gom nhóm tối đa 3 bộ cho mỗi trang A4 canvas
-    for i in range(0, len(card_pairs), 3):
-      chunk = card_pairs[i : i + 3]
+    # Gom nhóm tối đa 4 bộ cho mỗi trang A4 canvas
+    for i in range(0, len(card_pairs), 4):
+      chunk = card_pairs[i : i + 4]
       canvas = create_a4_canvas_horizontal(chunk)
       a4_canvases.append(canvas)
 
