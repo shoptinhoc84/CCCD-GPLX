@@ -7,7 +7,7 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches, Pt
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 import streamlit as st
 
 # ---------------------------------------------------------
@@ -121,7 +121,6 @@ def add_card_row_to_word(doc, pil_front, pil_back):
   cell_f = table.cell(0, 0)
   p_f = cell_f.paragraphs[0]
   p_f.alignment = WD_ALIGN_PARAGRAPH.CENTER
-  # Giảm kích thước ảnh xuống khoảng 3.0 inch để vừa khít 4 hàng trên 1 trang Word A4
   p_f.add_run().add_picture(buf_front, width=Inches(3.0))
 
   cell_b = table.cell(0, 1)
@@ -130,7 +129,7 @@ def add_card_row_to_word(doc, pil_front, pil_back):
   p_b.add_run().add_picture(buf_back, width=Inches(3.0))
 
   p_space = doc.add_paragraph()
-  p_space.paragraph_format.space_after = Pt(2)  # Khoảng cách tối ưu cho 4 bộ
+  p_space.paragraph_format.space_after = Pt(2)
 
 
 def create_multi_docx(card_pairs):
@@ -142,7 +141,6 @@ def create_multi_docx(card_pairs):
     section.right_margin = Inches(0.5)
 
   for i, (pil_front, pil_back) in enumerate(card_pairs):
-    # Cứ đúng 4 bộ mới ngắt trang Word
     if i > 0 and i % 4 == 0:
       doc.add_page_break()
     add_card_row_to_word(doc, pil_front, pil_back)
@@ -175,17 +173,38 @@ def create_single_cropped_docx(pil_cropped_img):
   return doc_io
 
 
+def draw_dashed_line(
+    draw, x1, y1, x2, y2, dash_length=10, space_length=8, fill="gray", width=2
+):
+  """Hẽ đường kẻ nét đứt để hỗ trợ cắt giấy dễ dàng"""
+  dx = x2 - x1
+  dy = y2 - y1
+  distance = max(abs(dx), abs(dy))
+  if distance == 0:
+    return
+  for i in range(0, int(distance), dash_length + space_length):
+    start = i / distance
+    end = min((i + dash_length) / distance, 1.0)
+    draw.line(
+        [
+            (x1 + dx * start, y1 + dy * start),
+            (x1 + dx * end, y1 + dy * end),
+        ],
+        fill=fill,
+        width=width,
+    )
+
+
 def create_a4_canvas_horizontal(card_pairs_chunk):
   a4_w, a4_h = 1240, 1754
   canvas = Image.new("RGB", (a4_w, a4_h), "white")
-  card_w, spacing_x = (
-      480,
-      40,
-  )  # Thu nhỏ bề ngang thẻ để vừa 4 hàng dọc cân đối trên A4
+  draw = ImageDraw.Draw(canvas)
+
+  card_w, spacing_x = 480, 40
   start_x = (a4_w - (card_w * 2 + spacing_x)) // 2
 
-  # Tọa độ Y cho ĐÚNG 4 bộ thẻ (8 mặt) trên 1 trang A4
   y_positions = [100, 500, 900, 1300]
+  row_heights = []
 
   for idx, (pil_front, pil_back) in enumerate(card_pairs_chunk):
     if idx >= 4:
@@ -203,6 +222,28 @@ def create_a4_canvas_horizontal(card_pairs_chunk):
 
     canvas.paste(f_resized, (start_x, y_pos))
     canvas.paste(b_resized, (start_x + card_w + spacing_x, y_pos))
+
+    # Lưu lại kích thước để vẽ đường cắt ngang dưới mỗi bộ thẻ
+    row_heights.append((y_pos, max(f_resized.height, b_resized.height)))
+
+  # Vẽ các đường kẻ cắt ngang nằm giữa các bộ thẻ (giúp người dùng dễ căn chỉnh kéo cắt)
+  for i in range(len(row_heights) - 1):
+    current_bottom = row_heights[i][0] + row_heights[i][1]
+    next_top = row_heights[i + 1][0]
+    mid_y = (current_bottom + next_top) // 2
+
+    # Vẽ đường nét đứt màu xám nhạt ở giữa khoảng trống
+    draw_dashed_line(
+        draw,
+        x1=100,
+        y1=mid_y,
+        x2=a4_w - 100,
+        y2=mid_y,
+        dash_length=15,
+        space_length=10,
+        fill="#A0A0A0",
+        width=2,
+    )
 
   return canvas
 
@@ -334,7 +375,6 @@ with tab1:
       status_text.empty()
       progress_bar.empty()
 
-    # Gom nhóm tối đa 4 bộ cho mỗi trang A4 canvas
     for i in range(0, len(card_pairs), 4):
       chunk = card_pairs[i : i + 4]
       canvas = create_a4_canvas_horizontal(chunk)
